@@ -36,11 +36,16 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_VERSION = "2.0.3"
+APP_VERSION = "2.0.4"
 APP_DIR = Path(__file__).resolve().parent
 HTML_NAME = "Bo_cong_cu_hoa_don.html"
 UI_CONFIG = APP_DIR / "app_ui.json"          # profile bạn thêm từ giao diện (không đụng tới app_config.json)
 DEFAULT_PROFILES = ["lh", "S7", "Tam_LH", "THP"]
+# Khu riêng cho mã tra cứu Petrolimex NHẬP THỦ CÔNG (khách gửi ngoài email, ảnh phiếu tra cứu...):
+# sổ riêng + thư mục riêng, không lẫn với thư mục tải / Ket_Qua / file tổng của các profile Gmail.
+PETRO_MANUAL_ID = "Petro_thu_cong"
+PETRO_MANUAL_DEFAULT_DIR = os.path.join("downloads", "Petro_thu_cong")
+PETRO_MANUAL_ACTIONS = ("download_petro", "mark_petro", "export_petro")
 PROFILE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,40}$")
 ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,80}$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -668,9 +673,27 @@ def resolve(path):
     return p if p.is_absolute() else tool_dir() / p
 
 
+def is_petro_manual(pid):
+    return safe_profile_name(pid).lower() == PETRO_MANUAL_ID.lower()
+
+
+def petro_manual_dir():
+    return resolve(load_ui().get("petro_manual_dir") or PETRO_MANUAL_DEFAULT_DIR)
+
+
 def profile_paths(pid):
     """Tính đường dẫn giống configure_runtime() của main.py."""
     safe = safe_profile_name(pid)
+    if is_petro_manual(safe):
+        # PDF, Ket_Qua.xlsx (ráp từ XML), Excel danh sách và file lỗi đều nằm chung 1 thư mục riêng
+        d = petro_manual_dir()
+        return {
+            "safe": PETRO_MANUAL_ID, "config": None, "ui": {}, "manual": True,
+            "download_dir": d, "token": None, "credentials": None,
+            "state": resolve(os.path.join("state", "processed_%s.db" % PETRO_MANUAL_ID)),
+            "petro_output": d / "hoa_don_petrolimex.xlsx", "log_dir": resolve("logs"),
+            "error_dir": d, "petro_download_dir": d,
+        }
     pc = None
     for item in app_config_profiles():
         if str(item.get("id", "")).lower() == safe.lower():
@@ -1206,6 +1229,8 @@ def clamp_int(v, lo, hi, default=None):
 
 def build_commands(pid, action, o):
     """Dựng tham số cho main.py từ lựa chọn trên giao diện. Chỉ các lệnh trong danh sách này được chạy."""
+    if is_petro_manual(pid) and action not in PETRO_MANUAL_ACTIONS:
+        raise ValueError("Mã Petrolimex nhập thủ công chỉ dùng để tải PDF Petrolimex")
     if action == "retry_links":
         items = o.get("items") or []
         if not isinstance(items, list) or not items:
@@ -1261,6 +1286,11 @@ def build_commands(pid, action, o):
         return "Quét hóa đơn → Excel (v25)", [["Quét bằng v25", [str(v25), str(folder), str(out), bool(o.get("skip_petro")), workers, o.get("fix_mst", True) is not False], False, "v25"]]
     base = ["--profile", pid]
     paths = profile_paths(pid)
+    if paths.get("manual"):
+        # Mã nhập thủ công: mọi file ghi vào thư mục riêng; không đối chiếu / không ghi vào file tổng Petro
+        d = str(paths["download_dir"])
+        base += ["--download-dir", d, "--petro-download-dir", d, "--petro-output", str(paths["petro_output"]),
+                 "--error-dir", d, "--petro-master", ""]
     # Thư mục tải đặt ở giao diện được ưu tiên (kể cả profile có trong app_config.json), giống profile_paths().
     # Trước đây chỉ truyền cho profile ngoài app_config.json nên app.py và main.py nhìn 2 thư mục khác nhau.
     if paths["ui"].get("download_dir"):
@@ -2345,6 +2375,8 @@ class Handler(BaseHTTPRequestHandler):
                 pid = str(body.get("id") or "").strip()
                 if not PROFILE_RE.match(pid):
                     raise ValueError("Tên profile chỉ gồm chữ không dấu, số, dấu gạch dưới, gạch ngang hoặc dấu chấm (tối đa 40 ký tự)")
+                if is_petro_manual(pid):
+                    raise ValueError("Tên %s dành cho mã Petrolimex nhập thủ công, hãy đặt tên khác" % PETRO_MANUAL_ID)
                 email = str(body.get("email") or "").strip()[:120]
                 ddir = str(body.get("download_dir") or "").strip()[:500]
                 with _UI_LOCK:                       # đọc-sửa-ghi trọn trong khóa, không ghi đè thay đổi của luồng khác
@@ -2421,6 +2453,25 @@ class Handler(BaseHTTPRequestHandler):
                         ui["v25_path"] = str(pth)
                     else:
                         ui.pop("v25_path", None)
+                    save_ui(ui)
+                return self._send(200, self.info())
+            if u.path == "/api/petro/manual-dir":
+                path = str(body.get("path") or "").strip().strip('"')[:500]
+                if path:
+                    new = resolve(path)
+                    key = _folder_key(new)
+                    for p in all_profiles():            # không dùng chung thư mục với profile Gmail nào
+                        pp = profile_paths(p["id"])
+                        for k in ("download_dir", "petro_download_dir"):
+                            if pp.get(k) and _folder_key(pp[k]) == key:
+                                raise ValueError("Thư mục này đang là thư mục tải của profile %s. Chọn thư mục khác "
+                                                 "để mã nhập thủ công không lẫn với hóa đơn từ email." % p["id"])
+                with _UI_LOCK:
+                    ui = load_ui()
+                    if path:
+                        ui["petro_manual_dir"] = path
+                    else:
+                        ui.pop("petro_manual_dir", None)
                     save_ui(ui)
                 return self._send(200, self.info())
             if u.path == "/api/prefs":
@@ -2501,7 +2552,9 @@ class Handler(BaseHTTPRequestHandler):
                     "main_path": str(Settings.main_py), "python": Settings.python,
                     "credentials_found": (tool_dir() / "credentials.json").exists(),
                     "features": main_features(), "ddddocr": DDDDOCR["ok"], "windows": os.name == "nt",
-                    "v25": str(find_v25() or ""), "cpu": os.cpu_count() or 1},
+                    "v25": str(find_v25() or ""), "cpu": os.cpu_count() or 1,
+                    "petro_manual": {"id": PETRO_MANUAL_ID, "dir": str(petro_manual_dir()),
+                                     "custom": bool(ui.get("petro_manual_dir"))}},
             "profiles": [profile_status(p) for p in all_profiles()],
             "last_profile": ui.get("last_profile") or DEFAULT_PROFILES[0],
             "job": cur.summary() if cur else None,

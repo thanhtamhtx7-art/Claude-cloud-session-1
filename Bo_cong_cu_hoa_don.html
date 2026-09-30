@@ -2419,6 +2419,10 @@ window.SAMPLE_INVOICES = [
     emit('profile');
   };
   Local.running = function () { return !!(Local.job && Local.job.status === 'running'); };
+  // Khu riêng cho mã Petrolimex nhập thủ công (app.py: PETRO_MANUAL_ID) - không gắn với Gmail nào
+  Local.petroManual = function () { return (Local.info && Local.info.app.petro_manual) || { id: 'Petro_thu_cong', dir: '' }; };
+  Local.petroManualId = function () { return Local.petroManual().id; };
+  Local.jobWho = function (j) { return j.profile === Local.petroManualId() ? 'Mã Petrolimex nhập thủ công' : 'Profile ' + j.profile; };
   // Cuộn tới khung "Lần chạy" đang hiện trên trang (sau khi bấm một nút chạy)
   Local.scrollToRun = function () {
     setTimeout(function () {
@@ -2477,9 +2481,11 @@ window.SAMPLE_INVOICES = [
     } catch (e) { U.toast(e.message); }
     Local.refresh();
   };
-  Local.run = async function (action, options) {
-    if (!Local.profile) throw new Error('Chưa chọn profile');
-    var data = await Local.api('/api/run', { profile: Local.profile, action: action, options: options || {} });
+  // profile: bỏ trống = profile đang chọn; Local.petroManualId() = khu mã Petrolimex nhập thủ công
+  Local.run = async function (action, options, profile) {
+    var pid = profile || Local.profile;
+    if (!pid) throw new Error('Chưa chọn profile');
+    var data = await Local.api('/api/run', { profile: pid, action: action, options: options || {} });
     Local.job = data.job; Local.lines = []; Local.next = 0;
     emit('job'); startPolling();
     return data.job;
@@ -2494,8 +2500,8 @@ window.SAMPLE_INVOICES = [
   };
   function fmtSec(s) { s = Math.round(s); return s < 90 ? s + ' giây' : Math.round(s / 60) + ' phút'; }
   Local.fmtSec = fmtSec;
-  Local.openFolder = async function (kind) {
-    try { await Local.api('/api/open', { profile: Local.profile, kind: kind }); }
+  Local.openFolder = async function (kind, profile) {
+    try { await Local.api('/api/open', { profile: profile || Local.profile, kind: kind }); }
     catch (e) { U.toast(e.message); }
   };
   function startPolling() {
@@ -2800,9 +2806,9 @@ window.SAMPLE_INVOICES = [
       }
       var st = a.stats;
       return [
-        h('div.card-h', h('div', h('h2', j.title), h('div.foot-note', j.action === 'scan_v25' ? 'Chạy bằng Python trên máy' : 'Profile ' + j.profile)), badge),
+        h('div.card-h', h('div', h('h2', j.title), h('div.foot-note', j.action === 'scan_v25' ? 'Chạy bằng Python trên máy' : Local.jobWho(j))), badge),
         a.captcha ? U.banner('warn', 'Cần bạn nhập CAPTCHA.', 'Tự giải chưa được: chuyển sang cửa sổ Chromium vừa mở, nhập CAPTCHA rồi bấm Tìm kiếm. Chương trình tự tải PDF sau đó.') : null,
-        a.xml.length ? a.xml.map(function (x) { return U.banner(x.err ? 'warn' : 'ok', x.err ? 'Ket_Qua.xlsx:' : 'Đã ráp XML.', x.text, !x.err ? h('button.btn.sm', { type: 'button', style: 'margin-left:8px', onclick: function () { Local.openFolder('ket_qua'); } }, 'Mở Ket_Qua.xlsx') : null); }) : null,
+        a.xml.length ? a.xml.map(function (x) { return U.banner(x.err ? 'warn' : 'ok', x.err ? 'Ket_Qua.xlsx:' : 'Đã ráp XML.', x.text, !x.err ? h('button.btn.sm', { type: 'button', style: 'margin-left:8px', onclick: function () { Local.openFolder('ket_qua', j.profile); } }, 'Mở Ket_Qua.xlsx') : null); }) : null,
         a.keepXml ? U.banner(a.keepSum && a.keepSum.err ? 'warn' : 'ok', 'Đã lưu ' + a.keepXml.n + ' file XML hóa đơn' + (j.status === 'running' ? ' (đang chạy)' : '') + '.',
           (a.keepSum ? 'Có XML: ' + a.keepSum.ok + ' email · không có XML: ' + a.keepSum.none + ' email · lỗi XML: ' + a.keepSum.err + ' email. ' : '') + (a.keepXml.dir ? 'Thư mục: ' + a.keepXml.dir + '.' : '') + (!a.keepSum && a.keepXmlWarn ? ' ' + a.keepXmlWarn + ' file XML không lưu được, xem nhật ký (PDF không bị ảnh hưởng).' : ''),
           h('button.btn.sm', { type: 'button', style: 'margin-left:8px', onclick: function () { Local.openFolder('xml'); } }, 'Mở thư mục XML')) : null,
@@ -3520,14 +3526,14 @@ window.SAMPLE_INVOICES = [
         } catch (e) { U.toast('Không đọc được file: ' + (e.message || e)); }
       } });
 
-    out.appendChild(U.header('Hóa đơn Petrolimex', 'Lọc trùng hóa đơn với file tổng, lấy danh sách còn phải tải PDF và trích mã tra cứu từ nội dung email.'));
+    out.appendChild(U.header('Hóa đơn Petrolimex', 'Lọc trùng hóa đơn với file tổng, thêm mã tra cứu thủ công và lấy danh sách còn phải tải PDF.'));
     out.appendChild(U.banner('info', 'Phần tải PDF cần CAPTCHA.', 'Việc mở trang Petrolimex và điền CAPTCHA do main.py làm trên máy bạn. Chạy app.py để có nút "Tải PDF còn thiếu" ngay trên trang; ở bản mở trực tiếp này bạn lọc trùng, lấy danh sách chờ tải và tạo lệnh.'));
     out.appendChild(h('div.split',
       h('section.card', h('h2', 'Danh sách hóa đơn'), dropRows),
       h('section.card', h('h2', 'File tổng (lọc trùng)'), dropMaster, masterInfo.el)));
-    out.appendChild(h('section.card', { 'aria-labelledby': 'p-list-h' }, h('div.card-h', h('h2', { id: 'p-list-h' }, 'Trạng thái từng hóa đơn'), h('a.btn.sm', { href: LOOKUP_URL, target: '_blank', rel: 'noopener noreferrer' }, U.icon('external', 16), 'Mở trang tra cứu Petrolimex')), listRegion.el));
     out.appendChild(importCard(function (items, thenDl, region) { importWeb(items, thenDl, region, listRegion); }));
-    out.appendChild(h('div.split', pasteCard(listRegion, cmdRegion), h('section.card', h('h2', 'Lệnh cho main.py'), cmdRegion.el)));
+    out.appendChild(h('section.card', { 'aria-labelledby': 'p-list-h' }, h('div.card-h', h('h2', { id: 'p-list-h' }, 'Trạng thái từng hóa đơn'), h('a.btn.sm', { href: LOOKUP_URL, target: '_blank', rel: 'noopener noreferrer' }, U.icon('external', 16), 'Mở trang tra cứu Petrolimex')), listRegion.el));
+    out.appendChild(h('section.card', h('h2', 'Lệnh cho main.py'), cmdRegion.el));
     return out;
   }
 
@@ -3613,39 +3619,11 @@ window.SAMPLE_INVOICES = [
   }
   function refreshCmd() { if (cmdRegionRef) { var active = document.activeElement, id = active && active.id; cmdRegionRef.update(); if (id) { var el = document.getElementById(id); if (el) { el.focus(); try { el.setSelectionRange(el.value.length, el.value.length); } catch (e) { /* number */ } } } } }
 
-  function pasteCard(listRegion, cmdRegion) {
-    cmdRegionRef = cmdRegion;
-    var ta = h('textarea', { placeholder: 'Dán nội dung email Petrolimex (văn bản hoặc HTML)…', 'aria-label': 'Nội dung email' });
-    var result = U.region(function () {
-      if (!S.found) return h('div.foot-note', 'Kết quả sẽ hiện ở đây.');
-      var f = S.found;
-      return h('div', { style: 'display:flex;flex-direction:column;gap:10px' },
-        h('div.grid.g2', U.kpi('Số hóa đơn', f.so_hoa_don || '—', f.so_hoa_don ? '' : 'Không tìm thấy', f.so_hoa_don ? '' : 'err'), U.kpi('Mã tra cứu', f.ma_tra_cuu || '—', f.ma_tra_cuu ? '' : 'Không tìm thấy', f.ma_tra_cuu ? '' : 'err')),
-        f.ma_tra_cuu ? h('div', { style: 'display:flex;gap:10px;flex-wrap:wrap' },
-          h('button.btn.sm', { type: 'button', onclick: function () { U.copy(f.ma_tra_cuu.replace(/\*+$/, ''), 'Đã sao chép mã'); } }, U.icon('copy', 16), 'Chép mã'),
-          h('button.btn.sm.primary', { type: 'button', onclick: function () {
-            S.manualN++;
-            var d = new Date(), p = function (n) { return String(n).padStart(2, '0'); };
-            S.rows.push({ row: 0, mail_date: p(d.getDate()) + '/' + p(d.getMonth() + 1) + '/' + d.getFullYear() + ' ' + p(d.getHours()) + ':' + p(d.getMinutes()), sender: '', subject: 'Nhập tay', so_hoa_don: f.so_hoa_don, ma_tra_cuu: f.ma_tra_cuu, pdf_file: '', email_id: '#tay-' + S.manualN, downloaded: false });
-            if (S.sample) { S.rows = [S.rows.pop()]; S.sample = false; S.name = 'Danh sách nhập tay'; S.done = new Set(); S.sel = new Set(); if (S.masterSample) { S.master = null; S.masterNames = []; if (masterInfoRef) masterInfoRef.update(); } }
-            listRegion.update(); cmdRegion.update(); U.toast('Đã thêm vào danh sách chờ tải');
-          } }, U.icon('plus', 16), 'Thêm vào danh sách')) : null);
-    });
-    ta.addEventListener('input', function () { S.paste = ta.value; });
-    return h('section.card', h('h2', 'Trích mã từ nội dung email'),
-      h('p.muted', 'Dùng khi một email báo thiếu dữ liệu: dán nội dung, trang sẽ tìm số hóa đơn và mã tra cứu giống cách main.py đọc.'),
-      ta,
-      h('div', h('button.btn.primary', { type: 'button', onclick: function () { S.found = L.petroExtractFields(ta.value || ''); result.update(); } }, 'Trích mã')),
-      result.el);
-  }
-
-
-
   // ================= Nhập mã tra cứu từ file Excel / danh sách =================
   var IM = { items: [], source: '', note: '', busy: false };
   function knownCodes() {
     var set = {};
-    var rows = (Local && Local.on) ? LS.rows : (S.rows || []);
+    var rows = (Local && Local.on) ? LS.manualRows : (S.rows || []);      // app.py: so với danh sách mã nhập thủ công
     rows.forEach(function (r) { var c = L.cleanPetroCode(String(r.ma_tra_cuu || '').replace(/\*+$/, '')); if (c) set[c] = true; });
     return set;
   }
@@ -3692,8 +3670,10 @@ window.SAMPLE_INVOICES = [
       } });
     Local && Local.on && Local.subscribe(function (ev) { if ((ev === 'job' || ev === 'jobend') && reg.el.isConnected) reg.update(); });
     return h('section.card', { 'aria-labelledby': 'pi-h' },
-      h('div.card-h', h('h2', { id: 'pi-h' }, 'Nhập mã tra cứu từ file')),
-      h('p.muted', 'Khách gửi hóa đơn Petrolimex không qua email? Đưa danh sách mã tra cứu vào đây, rồi tải PDF như các hóa đơn khác.'),
+      h('div.card-h', h('h2', { id: 'pi-h' }, 'Thêm mã tra cứu thủ công')),
+      h('p.muted', Local && Local.on
+        ? 'Mã khách gửi ngoài email, hoặc đọc từ ảnh phiếu tra cứu. Mã được lưu và tải PDF vào thư mục riêng (xem Cài đặt tải PDF ở trên), không lẫn với hóa đơn Petrolimex từ email của các profile.'
+        : 'Khách gửi hóa đơn Petrolimex không qua email? Đưa danh sách mã tra cứu vào đây, rồi tải PDF như các hóa đơn khác.'),
       drop, ta,
       h('div', h('button.btn.sm', { type: 'button', onclick: function () { if (!ta.value.trim()) { U.toast('Chưa dán mã nào'); return; } addParsed(L.petroCodesFromText(ta.value), 'danh sách dán vào'); ta.value = ''; } }, 'Đọc danh sách dán vào')),
       reg.el);
@@ -3701,9 +3681,11 @@ window.SAMPLE_INVOICES = [
   async function importLocal(items, thenDownload, region, listRegion) {
     IM.busy = true; region.update();
     try {
-      var res = await Local.api('/api/petro/import', { profile: Local.profile, items: items, source: IM.source });
-      U.toast('Đã thêm ' + res.added.length + ' mã' + (res.existed.length ? ', ' + res.existed.length + ' mã đã có' : '') + (res.invalid.length ? ', ' + res.invalid.length + ' mã không hợp lệ' : '') + ' vào profile ' + Local.profile);
+      // Luôn ghi vào khu mã nhập thủ công (sổ + thư mục riêng), KHÔNG vào profile Gmail đang chọn
+      var res = await Local.api('/api/petro/import', { profile: Local.petroManualId(), items: items, source: IM.source });
+      U.toast('Đã thêm ' + res.added.length + ' mã' + (res.existed.length ? ', ' + res.existed.length + ' mã đã có' : '') + (res.invalid.length ? ', ' + res.invalid.length + ' mã không hợp lệ' : '') + ' vào danh sách mã nhập thủ công');
       IM.items = []; IM.source = ''; IM.note = '';
+      LS.src = 'manual';
       await loadLocalPetro(listRegion);
       if (thenDownload && res.added.length) await runLocal('download_petro', petroOptions());
     } catch (e) { U.toast(e.message); }
@@ -3720,7 +3702,9 @@ window.SAMPLE_INVOICES = [
   }
 
   // ================= Chế độ chạy cùng app.py: đọc thẳng sổ Petro của profile =================
-  var LS = { rows: [], loading: false, error: '', profile: null, filter: 'ALL', q: '', sel: new Set(), shown: 200, limit: '', captcha: '', found: null };
+  // src: 'manual' = mã nhập thủ công (thư mục riêng) | 'profile' = hóa đơn Petrolimex từ email của profile đang chọn
+  var LS = { src: 'manual', rows: [], manualRows: [], loading: false, error: '', profile: null, filter: 'ALL', q: '', sel: new Set(), shown: 200 };
+  function target() { return LS.src === 'profile' ? Local.profile : Local.petroManualId(); }
   var LST = { pending: ['warn', 'Chờ tải'], failed: ['err', 'Tải lỗi'], done: ['ok', 'Đã tải'], dup: ['info', 'Trùng'], nocode: ['err', 'Thiếu dữ liệu'] };
   function localState(r) {
     if (!r.ma_tra_cuu) return 'nocode';
@@ -3733,27 +3717,29 @@ window.SAMPLE_INVOICES = [
   function localDetail(r, st) {
     if (st === 'done') return (r.pdf_error === 'MANUAL' ? 'Đã đánh dấu tải tay' : (r.pdf_file || 'Đã có PDF'));
     if (st === 'dup') return r.dup_of === 'MASTER' ? 'Đã có trong file tổng, không tải lại' : 'Trùng với email ' + r.dup_of + ', không tải lại';
-    if (st === 'failed' && /Không tồn tại/.test(r.pdf_error || '')) return 'Petrolimex báo không tồn tại hóa đơn với mã này: mở email kiểm tra lại mã tra cứu';
+    if (st === 'failed' && /Không tồn tại/.test(r.pdf_error || '')) return 'Petrolimex báo không tồn tại hóa đơn với mã này: ' + (/^nhap-tay-/.test(r.message_id || '') ? 'kiểm tra lại mã tra cứu' : 'mở email kiểm tra lại mã tra cứu');
     if (st === 'failed') return 'Lần trước lỗi' + (r.pdf_error ? ': ' + r.pdf_error : '') + (r.pdf_attempts ? ' · đã thử ' + r.pdf_attempts + ' lần' : '') + '. Sẽ thử lại khi tải PDF còn thiếu';
     if (st === 'nocode') return 'Email không có mã tra cứu: mở email kiểm tra';
-    var src = /^nhap-tay-/.test(r.message_id || '') ? ' · nhập từ file' : '';
+    var src = /^nhap-tay-/.test(r.message_id || '') ? ' · nhập thủ công' : '';
     return (r.so_hoa_don ? 'Chưa tải PDF' : 'Thiếu số hóa đơn, vẫn tra cứu được bằng mã') + src;
   }
   async function loadLocalPetro(region) {
-    var pid = Local.profile;
+    var pid = target();
     if (!pid) return;
     LS.loading = true;
     try {
       var d = await Local.api('/api/petro?profile=' + encodeURIComponent(pid));
-      if (pid !== Local.profile) return;
+      if (pid !== target()) return;
       if (LS.profile !== pid) { LS.sel = new Set(); LS.filter = 'ALL'; LS.shown = 200; }
       LS.rows = d.rows; LS.error = ''; LS.profile = pid;
+      if (pid === Local.petroManualId()) LS.manualRows = d.rows;
     } catch (e) { LS.error = e.message; LS.rows = []; LS.profile = pid; }
     LS.loading = false;
     region.update();
+    if (LS.onLoad) LS.onLoad();        // cập nhật nút "Tải PDF còn thiếu (n)" theo danh sách mới
   }
   async function runLocal(action, options) {
-    try { await Local.run(action, options); U.toast('Đã bắt đầu: ' + Local.job.title); if (action === 'download_petro') Local.scrollToRun(); }
+    try { await Local.run(action, options, target()); U.toast('Đã bắt đầu: ' + Local.job.title + (LS.src === 'manual' ? ' (mã nhập thủ công)' : '')); if (action === 'download_petro') Local.scrollToRun(); }
     catch (e) { U.toast(e.message); }
   }
   function petroOptions() { return Local.petroOptions(); }
@@ -3786,7 +3772,7 @@ window.SAMPLE_INVOICES = [
             h('button.btn.sm', { type: 'button', 'aria-label': 'Sao chép mã ' + code, style: 'min-height:28px;padding:0 8px', onclick: function () { U.copy(code, 'Đã sao chép mã ' + code); } }, U.icon('copy', 14))) : '—'),
           h('td.w-nowrap.num', x.r.mail_date || '—'), h('td', U.badge(b[0], b[1])), h('td', localDetail(x.r, x.st)),
           h('td', can ? h('button.btn.sm', { type: 'button', disabled: running, onclick: function () { runLocal('mark_petro', { ids: [code] }); } }, 'Đánh dấu đã tải') : null));
-      }) : h('tr', h('td', { colspan: '7' }, h('div.empty', LS.rows.length ? 'Không có hóa đơn nào khớp bộ lọc.' : 'Sổ Petrolimex của profile này đang trống. Hóa đơn sẽ xuất hiện sau khi Quét & tải có email Petrolimex.'))))));
+      }) : h('tr', h('td', { colspan: '7' }, h('div.empty', LS.rows.length ? 'Không có hóa đơn nào khớp bộ lọc.' : (LS.src === 'manual' ? 'Chưa có mã nhập thủ công nào. Thêm mã ở mục "Thêm mã tra cứu thủ công" phía trên.' : 'Sổ Petrolimex của profile này đang trống. Hóa đơn sẽ xuất hiện sau khi Quét & tải có email Petrolimex.')))))));
     return [
       h('div.grid.g4', U.kpi('Chờ tải', U.fmt.int(cnt.pending + cnt.failed), cnt.failed ? cnt.failed + ' mã lần trước lỗi' : 'có mã tra cứu, chưa có PDF', 'warn'), U.kpi('Đã tải', U.fmt.int(cnt.done), 'đã có PDF', 'ok'),
         U.kpi('Trùng', U.fmt.int(cnt.dup), 'bỏ qua, không tải lại'), U.kpi('Thiếu dữ liệu', U.fmt.int(cnt.missing), 'thiếu số hóa đơn hoặc mã', cnt.missing ? 'err' : '')),
@@ -3804,37 +3790,71 @@ window.SAMPLE_INVOICES = [
   function buildLocal() {
     var out = h('div', { style: 'display:contents' });
     var listRegion = U.region(function (region) { return localListView(region); });
+    function srcLabel() { return LS.src === 'manual' ? 'mã nhập thủ công' : 'email của ' + (Local.profile || '?'); }
     var actions = U.region(function () {
       var running = Local.running(), ok = Local.info && Local.info.app.main_found;
       var todo = LS.rows.filter(function (r) { var s = localState(r); return s === 'pending' || s === 'failed'; }).length;
       return [
-        h('button.btn', { type: 'button', onclick: function () { Local.openFolder('petro'); } }, U.icon('folder', 18), 'Mở thư mục PDF Petro'),
+        h('button.btn', { type: 'button', onclick: function () { Local.openFolder('petro', target()); } }, U.icon('folder', 18), 'Mở thư mục PDF'),
         h('button.btn.primary', { type: 'button', disabled: running || !ok || !todo, onclick: function () { runLocal('download_petro', petroOptions()); } }, U.icon('play', 18), running ? 'Đang chạy…' : 'Tải PDF còn thiếu' + (todo ? ' (' + todo + ')' : ''))
       ];
     });
     actions.el.className = 'actions';
     var headText = U.region(function () {
       return [h('h1', 'Hóa đơn Petrolimex'),
-        h('p', 'Hóa đơn Petrolimex' + (Local.profile ? ' của ' + Local.profile : '') + ': tra cứu bằng mã, tự giải CAPTCHA, tải PDF và XML. Cài đặt tải PDF nằm ngay dưới bảng.')];
+        h('p', 'Tra cứu bằng mã, tự giải CAPTCHA, tải PDF và XML. Đang xem: ' + srcLabel() + '.')];
     }, 'div');
-    // Cài đặt tải PDF Petrolimex chỉ nằm ở trang này (trang Gmail dùng lại cài đặt này khi "Tải luôn PDF Petrolimex")
-    var opts = h('section.card', h('h2', 'Cài đặt tải PDF'),
+
+    // --- 1. Cài đặt tải PDF (dùng chung cho mọi nút tải Petrolimex, kể cả bước Petrolimex khi Quét & tải) ---
+    var DIR = { edit: false, val: '', err: '', busy: false };
+    var dirRegion = U.region(function (region) {
+      var m = Local.petroManual();
+      if (!DIR.edit) {
+        return h('div', { style: 'display:flex;flex-direction:column;gap:8px' },
+          h('div', h('b', 'Thư mục lưu mã nhập thủ công'), h('div.mono', { style: 'overflow-wrap:anywhere' }, m.dir || '(chưa có thông tin)')),
+          h('div.foot-note', 'PDF, Ket_Qua.xlsx, Excel danh sách và file lỗi của mã nhập thủ công lưu tại đây, tách khỏi thư mục tải của các profile Gmail. Không đối chiếu và không ghi vào file tổng Petro.'),
+          h('div', { style: 'display:flex;gap:10px;flex-wrap:wrap' },
+            h('button.btn.sm', { type: 'button', onclick: function () { Local.openFolder('petro', Local.petroManualId()); } }, U.icon('folder', 16), 'Mở thư mục'),
+            h('button.btn.sm', { type: 'button', disabled: Local.running(), onclick: function () { DIR.edit = true; DIR.val = m.custom ? m.dir : ''; DIR.err = ''; region.update(); } }, 'Đổi thư mục')));
+      }
+      var inp = h('input', { type: 'text', value: DIR.val, placeholder: 'Để trống: downloads\\Petro_thu_cong', 'aria-label': 'Thư mục lưu mã nhập thủ công' });
+      inp.addEventListener('input', function () { DIR.val = inp.value; });
+      return h('div', { style: 'display:flex;flex-direction:column;gap:8px' },
+        U.field('Thư mục lưu mã nhập thủ công', inp, 'Ví dụ D:\\Hoa_don_khach_gui. Không được trùng thư mục tải của profile Gmail nào. Mã đã nhập vẫn giữ nguyên; PDF tải từ giờ lưu vào thư mục mới.', null),
+        DIR.err ? U.banner('err', '', DIR.err) : null,
+        h('div', { style: 'display:flex;gap:10px;flex-wrap:wrap' },
+          h('button.btn.sm.primary', { type: 'button', disabled: DIR.busy, onclick: async function () {
+            DIR.busy = true; region.update();
+            try { Local.info = await Local.api('/api/petro/manual-dir', { path: DIR.val.trim() }); DIR.edit = false; DIR.err = ''; U.toast('Đã lưu thư mục mã nhập thủ công'); headText.update(); }
+            catch (e) { DIR.err = e.message; }
+            DIR.busy = false; region.update();
+          } }, 'Lưu'),
+          h('button.btn.sm', { type: 'button', onclick: function () { DIR.edit = false; region.update(); } }, 'Hủy')));
+    });
+    var opts = h('section.card', { 'aria-labelledby': 'pl-opt-h' }, h('h2', { id: 'pl-opt-h' }, 'Cài đặt tải PDF'),
       Local.petroForm('pl-p'),
-      h('div.foot-note', 'Dùng cho cả nút "Tải PDF còn thiếu" và bước Petrolimex khi Quét & tải. Hóa đơn đã có trong file tổng hoặc trùng email khác được tự bỏ qua. Mã tự giải không được ghi "Tải lỗi" và được thử lại ở lần tải sau.'),
+      h('div.foot-note', 'Dùng cho nút "Tải PDF còn thiếu" và bước Petrolimex khi Quét & tải. Mã tự giải không được ghi "Tải lỗi" và được thử lại ở lần tải sau.'),
+      dirRegion.el,
       h('div', { style: 'display:flex;gap:10px;flex-wrap:wrap' },
-        h('button.btn.sm', { type: 'button', onclick: function () { Local.openFolder('ket_qua'); } }, U.icon('table', 16), 'Mở Excel Petrolimex'),
+        h('button.btn.sm', { type: 'button', onclick: function () { Local.openFolder('ket_qua', target()); } }, U.icon('table', 16), 'Mở Ket_Qua.xlsx'),
         h('button.btn.sm', { type: 'button', onclick: mergeXml }, 'Ráp XML còn lại'),
         h('a.btn.sm', { href: LOOKUP_URL, target: '_blank', rel: 'noopener noreferrer' }, U.icon('external', 16), 'Trang tra cứu Petrolimex')));
-    var ta = h('textarea', { placeholder: 'Dán nội dung email Petrolimex (văn bản hoặc HTML)…', 'aria-label': 'Nội dung email' });
-    var found = U.region(function () {
-      if (!LS.found) return h('div.foot-note', 'Dùng khi một email báo thiếu dữ liệu: dán nội dung, trang tìm số hóa đơn và mã tra cứu giống cách main.py đọc.');
-      var f = LS.found;
-      return h('div.grid.g2', U.kpi('Số hóa đơn', f.so_hoa_don || '—', f.so_hoa_don ? '' : 'Không tìm thấy', f.so_hoa_don ? '' : 'err'), U.kpi('Mã tra cứu', f.ma_tra_cuu || '—', f.ma_tra_cuu ? '' : 'Không tìm thấy', f.ma_tra_cuu ? '' : 'err'));
+
+    // --- 3. Trạng thái từng hóa đơn: xem mã nhập thủ công, hoặc hóa đơn Petrolimex từ email của profile ---
+    LS.onLoad = function () { actions.update(); };
+    var srcChips = U.region(function () {
+      return U.chips([{ id: 'manual', label: 'Mã nhập thủ công' }, { id: 'profile', label: 'Từ email · ' + (Local.profile || '?') }], LS.src, function (id) {
+        if (id === LS.src) return;
+        LS.src = id; srcChips.update(); headText.update(); actions.update();
+        loadLocalPetro(listRegion).then(function () { actions.update(); });
+      });
     });
+
     Local.subscribe(function (ev) {
       if (ev === 'lines' || ev === 'petro') return;
-      actions.update(); headText.update();
-      if (ev === 'profile' || ev === 'jobend' || (ev === 'info' && LS.profile === null)) loadLocalPetro(listRegion).then(function () { actions.update(); });
+      actions.update(); headText.update(); srcChips.update();
+      if (!DIR.edit) dirRegion.update();
+      if ((ev === 'profile' && LS.src === 'profile') || ev === 'jobend' || (ev === 'info' && LS.profile === null)) loadLocalPetro(listRegion).then(function () { actions.update(); });
       else listRegion.update();
     });
     if (Local.info) loadLocalPetro(listRegion).then(function () { actions.update(); });
@@ -3842,20 +3862,18 @@ window.SAMPLE_INVOICES = [
     async function mergeXml() {
       if (Local.running()) { U.toast('Đang chạy, chờ xong rồi thử lại'); return; }
       try {
-        var r = await Local.api('/api/petro/merge-xml', { profile: Local.profile });
-        if (!r.found) U.toast('Không còn file XML nào trong thư mục PDF Petro');
+        var r = await Local.api('/api/petro/merge-xml', { profile: target() });
+        if (!r.found) U.toast('Không còn file XML nào trong thư mục PDF Petrolimex');
         else U.toast((r.messages || []).map(function (m) { return m.text; }).join(' ') || 'Xong');
       } catch (e) { U.toast(e.message); }
     }
     out.appendChild(h('header.head', headText.el, actions.el));
-    out.appendChild(h('section.card', { 'aria-labelledby': 'pl-list-h' }, h('div.card-h', h('h2', { id: 'pl-list-h' }, 'Trạng thái từng hóa đơn'), h('button.btn.sm', { type: 'button', onclick: function () { loadLocalPetro(listRegion); } }, 'Tải lại')), listRegion.el));
+    // Thứ tự: 1. Cài đặt tải PDF (kèm tiến độ lần chạy) -> 2. Thêm mã tra cứu thủ công -> 3. Trạng thái từng hóa đơn
     out.appendChild(h('div.split', opts, Local.runPanel({ actions: ['download_petro', 'mark_petro'], emptyText: 'Bấm "Tải PDF còn thiếu" để bắt đầu. Tiến độ từng mã sẽ hiện ở đây.' })));
-    // Thêm mã thủ công: gom "nhập từ file / dán danh sách" và "trích mã từ nội dung email" vào một mục thu gọn
-    out.appendChild(h('details.card', h('summary', h('span', 'Thêm mã tra cứu thủ công', h('span.foot-note', { style: 'display:block;font-weight:400' }, 'Hóa đơn khách gửi ngoài email, hoặc email báo thiếu mã tra cứu')), U.icon('plus', 18)),
-      h('div.more-body',
-        importCard(function (items, thenDl, region) { importLocal(items, thenDl, region, listRegion); }),
-        h('section.card', h('h2', 'Trích mã từ nội dung email'), ta,
-          h('div', h('button.btn.primary', { type: 'button', onclick: function () { LS.found = L.petroExtractFields(ta.value || ''); found.update(); } }, 'Trích mã')), found.el))));
+    out.appendChild(importCard(function (items, thenDl, region) { importLocal(items, thenDl, region, listRegion); }));
+    out.appendChild(h('section.card', { 'aria-labelledby': 'pl-list-h' },
+      h('div.card-h', h('h2', { id: 'pl-list-h' }, 'Trạng thái từng hóa đơn'), h('button.btn.sm', { type: 'button', onclick: function () { loadLocalPetro(listRegion); } }, 'Tải lại')),
+      srcChips.el, listRegion.el));
     return out;
   }
 
