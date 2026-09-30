@@ -6,8 +6,11 @@
 #   -KemDuLieu                                 chép thêm state\, downloads\, outputs\ (khi PC mới vẫn đọc các Gmail cũ)
 #   -KemFileTongPetro                          chép thêm file tổng Petro ở ổ D:
 #   -KhongHoi                                  không hỏi gì, dùng mặc định (không kèm dữ liệu, không kèm file tổng)
+#   -DuAn "C:\...\gmail_api_project"           thư mục dự án (chứa app_config.json). Không truyền thì tự tìm:
+#                                              thư mục chứa bo_chuyen_may, rồi Desktop\gmail_api_project
 param(
     [string]$Dich = "",
+    [string]$DuAn = "",
     [switch]$KemDuLieu,
     [switch]$KemFileTongPetro,
     [switch]$KhongHoi
@@ -22,13 +25,33 @@ function Hoi-CoKhong([string]$cauHoi, [bool]$macDinh) {
     return $tl.Trim().ToLower().StartsWith("c")
 }
 
-# ---------- 1. Thư mục dự án (thư mục chứa bo_chuyen_may) ----------
-$Goc = Split-Path $PSScriptRoot -Parent
-if (-not (Test-Path (Join-Path $Goc "app_config.json"))) {
-    Write-Host "[LỖI] Không thấy app_config.json trong $Goc" -ForegroundColor Red
-    Write-Host "      Hãy để thư mục bo_chuyen_may nằm ngay trong thư mục dự án (cạnh app_config.json)."
-    exit 1
+# ---------- 1. Thư mục dự án (thư mục có app_config.json) ----------
+# Tìm lần lượt: -DuAn / thư mục chứa bo_chuyen_may / chính thư mục script / thư mục trên nữa /
+# Desktop\gmail_api_project (Desktop nằm trong OneDrive cũng được). Không thấy thì hỏi đường dẫn.
+function La-DuAn([string]$d) { return [bool]($d -and (Test-Path -LiteralPath (Join-Path $d "app_config.json"))) }
+$Goc = $null
+if ($DuAn) {
+    $DuAn = $DuAn.Trim().Trim('"')
+    if (-not (La-DuAn $DuAn)) { Write-Host "[LỖI] Không thấy app_config.json trong $DuAn (tham số -DuAn)" -ForegroundColor Red; exit 1 }
+    $Goc = $DuAn
+} else {
+    $cha = Split-Path $PSScriptRoot -Parent
+    $timO = @($cha, $PSScriptRoot, $(if ($cha) { Split-Path $cha -Parent }),
+              $(if ([Environment]::GetFolderPath("Desktop")) { Join-Path ([Environment]::GetFolderPath("Desktop")) "gmail_api_project" }),
+              $(if ($env:USERPROFILE) { Join-Path $env:USERPROFILE "Desktop\gmail_api_project" })) | Where-Object { $_ }
+    $Goc = @($timO | Where-Object { La-DuAn $_ }) | Select-Object -First 1
+    if (-not $Goc -and -not $KhongHoi) {
+        Write-Host "Không tự tìm thấy thư mục dự án (đã tìm ở: $($timO -join '; '))." -ForegroundColor Yellow
+        $tl = (Read-Host "Nhập đường dẫn thư mục dự án có app_config.json, vd C:\Users\...\Desktop\gmail_api_project").Trim().Trim('"')
+        if (La-DuAn $tl) { $Goc = $tl }
+    }
+    if (-not $Goc) {
+        Write-Host "[LỖI] Không tìm thấy thư mục dự án (thư mục có app_config.json)." -ForegroundColor Red
+        Write-Host "      Chạy lại và nhập đường dẫn, hoặc: Gom_file_chuyen_may.bat -DuAn ""C:\...\gmail_api_project"""
+        exit 1
+    }
 }
+$Goc = (Resolve-Path -LiteralPath $Goc).Path.TrimEnd('\')
 Write-Host "Thư mục dự án : $Goc"
 
 # ---------- 2. Chọn bản code mới nhất (APP_VERSION cao nhất có đủ 4 file) ----------
@@ -126,9 +149,17 @@ function Chep([string]$nguon, [string]$ten, [string]$vao = "") {
 Write-Host ""
 Write-Host "Đang chép..."
 foreach ($f in $can) { Chep (Join-Path $chon.Dir $f) $f }
-foreach ($f in @("email_state.py", "Chay_giao_dien.bat", "app_config.json")) {
+foreach ($f in @("email_state.py", "Chay_giao_dien.bat")) {
     $p = if (Test-Path (Join-Path $chon.Dir $f)) { Join-Path $chon.Dir $f } else { Join-Path $Goc $f }
     if (Test-Path $p) { Chep $p $f } else { Write-Host "  [CẢNH BÁO] Không thấy $f" -ForegroundColor Yellow }
+}
+# app_config.json: lấy bản trong THƯ MỤC DỰ ÁN (vd gmail_api_project\app_config.json); không có mới lấy bản cạnh code.
+$cfgDuAn, $cfgCode = (Join-Path $Goc "app_config.json"), (Join-Path $chon.Dir "app_config.json")
+$cfg = if (Test-Path -LiteralPath $cfgDuAn) { $cfgDuAn } else { $cfgCode }
+Chep $cfg "app_config.json"
+if ($cfg -ne $cfgCode -and (Test-Path -LiteralPath $cfgCode) -and
+    ((Get-FileHash -LiteralPath $cfg).Hash -ne (Get-FileHash -LiteralPath $cfgCode).Hash)) {
+    $canhBao.Add("Có 2 bản app_config.json khác nhau: $cfg (đã chép) và $cfgCode. Kiểm tra danh sách profile trên PC mới.")
 }
 
 # v25: giao diện chạy file v25 đã lưu trong app_ui.json (v25_path) - có thể nằm NGOÀI thư mục code.
@@ -164,8 +195,18 @@ New-Item -ItemType Directory -Force (Join-Path $Dich "tokens") | Out-Null     # 
 # ---------- 5. Dữ liệu (tùy chọn) ----------
 if ($KemDuLieu) {
     foreach ($d in @("state", "downloads", "outputs")) {
-        $p = Join-Path $Goc $d
-        if (Test-Path $p) {
+        # Chương trình ghi dữ liệu cạnh main.py; bản code nằm ở thư mục con (vd "New folder") thì dữ liệu có thể
+        # ở đó thay vì ở thư mục dự án -> xét cả 2, lấy chỗ có file sửa gần nhất.
+        $co = @(@((Join-Path $Goc $d), (Join-Path $chon.Dir $d)) | Select-Object -Unique | Where-Object { Test-Path -LiteralPath $_ })
+        $p = $null
+        if ($co.Count -eq 1) { $p = $co[0] }
+        elseif ($co.Count -gt 1) {
+            $moiNhat = { param($x) $f = Get-ChildItem -LiteralPath $x -Recurse -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if ($f) { $f.LastWriteTime } else { [datetime]::MinValue } }
+            $p = @($co | Sort-Object { & $moiNhat $_ } -Descending)[0]
+            $khac = @($co | Where-Object { $_ -ne $p })[0]
+            $canhBao.Add("Có 2 thư mục $d\: đã chép $p (có file mới hơn), KHÔNG chép $khac. Nếu cần bản kia thì tự chép thêm.")
+        }
+        if ($p) {
             Chep $p $d
             # Chép nguyên thư mục, kể cả *.db-wal nếu có: file này có thể còn dữ liệu CHƯA ghi vào *.db
             # (vì vậy nên tắt chương trình trước khi gom, xem bước 2b).

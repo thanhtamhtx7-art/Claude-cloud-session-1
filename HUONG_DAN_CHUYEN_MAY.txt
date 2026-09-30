@@ -16,7 +16,8 @@ A. TRÊN PC CŨ: GOM FILE
 ----------------------------------------------------------------------
 0. TẮT cửa sổ Chay_giao_dien.bat (và main.py nếu đang chạy) để sổ theo dõi ghi xong hết.
    Script tự kiểm tra: còn đang chạy thì sẽ hỏi lại trước khi gom.
-1. Mở thư mục bo_chuyen_may (nằm trong thư mục dự án), bấm đúp Gom_file_chuyen_may.bat.
+1. Mở thư mục bo_chuyen_may, bấm đúp Gom_file_chuyen_may.bat. Script tự tìm thư mục dự án (thư mục có
+   app_config.json): thư mục chứa bo_chuyen_may, hoặc Desktop\gmail_api_project; không thấy thì hỏi đường dẫn.
 2. Trả lời các câu hỏi:
    - Dùng bản code nào: Enter = bản mới nhất (bản đang chạy, vd 2.0.1).
    - Thư mục đích: Enter = Desktop\Bo_cong_cu_hoa_don_chuyen_may.
