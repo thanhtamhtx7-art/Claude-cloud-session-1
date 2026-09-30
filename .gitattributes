@@ -1,3 +1,4 @@
 # File .bat phải có xuống dòng kiểu Windows (CRLF), nếu không lệnh goto/nhãn trong cmd có thể chạy sai
 *.bat text eol=crlf
 *.cmd text eol=crlf
+*.ps1 text eol=crlf
