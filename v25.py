@@ -6,6 +6,7 @@ import math
 import os
 import re
 import sys
+import threading
 import unicodedata
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -905,6 +906,8 @@ def main():
             f = os.path.relpath(path, IMPORT_FOLDER)
             try:
                 rows = future.result()
+                if not rows:
+                    raise ValueError("không đọc được dòng nào")
                 first = rows[0]
                 tag  = "[PLX]" if first.get("Nha phat hanh") == "petrolimex" else "[STD]"
                 icon = "[IMG]" if first.get("Loai PDF") == "image" else ("[ERR]" if first.get("Nguon") in ("empty","error") else "[TXT]")
@@ -915,7 +918,9 @@ def main():
                     r.pop("_extra", None)
                     results.append(r)
             except Exception as exc:
-                print(f"  [ERR] {f} gặp lỗi: {exc}")
+                # Không bỏ file: vẫn ghi 1 dòng "error" để thấy file này trong Ket_Qua.xlsx và kiểm tra tay
+                print(f"  [ERR] {f} gặp lỗi: {exc!r} -> ghi dòng 'error' vào kết quả để kiểm tra tay")
+                results.append(_error_row(path, alias))
 
     df = pd.DataFrame(sorted(results, key=_result_sort_key), columns=COLUMNS)
 
@@ -956,6 +961,15 @@ def main():
     print(f"\nDONE → {out_path}")
     print(f"  Tổng dòng: {len(df)} | OK ký hiệu: {ok} | Từ {len(input_items)} file PDF/ảnh")
     print(f"  Petrolimex: {plx} | Standard: {std} | Lỗi: {err}")
+
+def _error_row(path: str, alias: str = "") -> dict:
+    """Dòng thay thế khi 1 file bị lỗi lúc quét (để file không biến mất khỏi kết quả)."""
+    row = {k: "" for k in COLUMNS}
+    row.update({"Ten file": os.path.splitext(os.path.basename(path))[0], "Nguon": "error"})
+    if alias:
+        row["_source_alias"] = alias
+    return row
+
 
 def _ocr_digits(val: str) -> str:
     return val.translate(str.maketrans({"O": "0", "o": "0", "W": "4", "w": "4", "I": "1", "l": "1"}))
@@ -1225,40 +1239,131 @@ def _word_amount_should_override_number(number_value: int, word_value: int) -> b
     return len(diffs) == 1 and set(diffs[0]) <= {"1", "7"}
 
 
+# ── Tiền TRƯỚC thuế GTGT (VAT) ───────────────────────────────────────────────
+# Cột "Cộng tiền hàng" luôn là số tiền CHƯA gồm VAT (áp dụng cho mọi hóa đơn).
+# Số tiền viết bằng chữ và dòng "Tổng tiền thanh toán" là số ĐÃ gồm VAT -> phải trừ tiền thuế GTGT.
+# Hóa đơn không có VAT (như xăng dầu hiện nay) thì 2 số này bằng nhau, không bị trừ gì.
+_VAT_RATES = (0.05, 0.08, 0.10)
+_MAX_AMOUNT = 99_999_999_999          # trần cho số có dấu phân cách hàng nghìn trên dòng có nhãn tiền
+
+
+def _vat_rate_from_text(text: str) -> float:
+    """Thuế suất GTGT ghi trên hóa đơn (5/8/10%). Không thấy -> 0."""
+    norm = no_accent(text or "").lower()
+    for m in re.finditer(r"(?:thue\s*suat|vat|gtgt)[^\n%]{0,25}?(\d{1,2})\s*%", norm):
+        rate = int(m.group(1)) / 100
+        if rate in _VAT_RATES:
+            return rate
+    return 0.0
+
+
+def _vat_amounts_from_text(text: str) -> list[int]:
+    """Các số tiền thuế GTGT trên hóa đơn (bỏ qua thuế bảo vệ môi trường)."""
+    out = []
+    for line in no_accent(text or "").lower().splitlines():
+        m = re.search(r"tien\s*thue|thue\s*gtgt|vat\s*amount|tien\s*vat", line)
+        if not m or re.search(r"bao\s*ve\s*moi\s*truong|bvmt", line):
+            continue
+        for num in re.findall(r"(?<!\d)\d{1,3}(?:[.,]\s*\d{3})+", line[m.start():]):
+            out.append(int(re.sub(r"\D", "", num)))
+    return out
+
+
+def _vat_matches(pre: int, tax: int, rate: float = 0.0) -> bool:
+    """tax có đúng là tiền VAT của pre không (cho phép lệch vài đồng do làm tròn)."""
+    if pre <= 0 or tax <= 0:
+        return False
+    return any(abs(tax - pre * r) <= max(3, pre * r * 0.002) for r in ((rate,) if rate else _VAT_RATES))
+
+
+def _pre_tax_from_total(total: int, text: str, allow_rate_only: bool = False) -> int:
+    """Số tiền ĐÃ gồm VAT -> số tiền trước VAT.
+    Ưu tiên trừ tiền thuế GTGT đọc được trên hóa đơn. allow_rate_only=True (chắc chắn `total` là số đã gồm
+    VAT, vd số tiền bằng chữ): không đọc được tiền thuế thì chia theo thuế suất. Không có VAT -> giữ nguyên."""
+    if not total:
+        return total
+    rate = _vat_rate_from_text(text)
+    for tax in _vat_amounts_from_text(text):
+        if 0 < tax < total and _vat_matches(total - tax, tax, rate):
+            return total - tax
+    if allow_rate_only and rate:
+        return int(round(total / (1 + rate)))
+    return total
+
+
+def _pick_pre_tax(values: list[int], rate: float = 0.0) -> int:
+    """Trong các số tiền đọc được, chọn số tiền trước VAT:
+    có bộ (tiền hàng, tiền thuế, tổng) -> lấy tiền hàng; có (tiền thuế, tổng) -> tổng - thuế; không thì số lớn nhất."""
+    vals = sorted(set(values))
+    have = set(vals)
+    for a in reversed(vals):
+        for t in vals:
+            if t < a and (a + t) in have and _vat_matches(a, t, rate):
+                return a
+    top = vals[-1]
+    for t in vals[:-1]:
+        if _vat_matches(top - t, t, rate):
+            return top - t
+    return top
+
+
+_PRE_TAX_KEYS = (
+    "cong tien hang",
+    "tong tien hang",
+    "tien hang truoc thue",
+    "tong tien chua thue",
+    "tien truoc thue",
+)
+_TOTAL_KEYS = (
+    "tong tien thanh toan",
+    "tong cong tien thanh toan",
+    "tong so tien thanh toan",
+)
+
+
 def _money_from_text(text: str) -> str:
     norm = no_accent(text)
     lines = [clean(line) for line in norm.splitlines() if clean(line)]
-    word_val = _parse_vn_words(text)
+    rate = _vat_rate_from_text(text)
+    # Số tiền bằng chữ = tổng thanh toán (đã gồm VAT) -> đổi về tiền trước VAT để so / dùng thay
+    word_val = _pre_tax_from_total(_parse_vn_words(text), text, allow_rate_only=True)
 
-    def money_candidates(line: str) -> list[int]:
+    def money_candidates(line: str, labeled: bool = False) -> list[int]:
         fixed = re.sub(r"(?<=[\s|])[%§](?=\d)", "8", line)
         nums = re.findall(r"(?<!\d)\d{1,3}(?:[.,]\s*\d{3})+|(?<!\d)\d{5,}", fixed)
         values = []
         for num in nums:
-            amount = _amount_to_int_string(num)
-            if amount:
-                val = int(amount)
-                if 100000 <= val <= 50_000_000:
-                    values.append(val)
+            digits = re.sub(r"\D", "", num)
+            if len(digits) < 4:
+                continue
+            val = int(digits)
+            # Dòng có nhãn tiền + số có dấu phân cách: nhận cả hóa đơn trên 50 triệu.
+            # Số viết liền (có thể là MST, số điện thoại...) vẫn giới hạn 50 triệu như cũ.
+            hi = _MAX_AMOUNT if (labeled and re.search(r"[.,]", num)) else 50_000_000
+            if 100000 <= val <= hi:
+                values.append(val)
         return values
 
-    priority = (
-        "tong tien hang",
-        "cong tien hang",
-        "cong tien hang truoc thue",
-        "tong tien thanh toan",
-        "tong cong tien thanh toan",
-        "tong so tien thanh toan",
-    )
+    def finish(value: int) -> str:
+        if _word_amount_should_override_number(value, word_val):
+            return str(word_val)
+        return str(value)
+
+    # 1) Dòng "Cộng tiền hàng" / "Tổng tiền hàng" / "Tiền hàng trước thuế" (chưa gồm VAT)
     for line in lines:
         low = line.lower()
-        if any(key in low for key in priority):
-            values = money_candidates(line)
+        if any(key in low for key in _PRE_TAX_KEYS):
+            values = money_candidates(line, labeled=True)
             if values:
-                value = max(values)
-                if _word_amount_should_override_number(value, word_val):
-                    return str(word_val)
-                return str(value)
+                return finish(_pick_pre_tax(values, rate))
+
+    # 2) Chỉ có dòng "Tổng tiền thanh toán" (đã gồm VAT) -> trừ tiền thuế GTGT
+    for line in lines:
+        low = line.lower()
+        if any(key in low for key in _TOTAL_KEYS):
+            values = money_candidates(line, labeled=True)
+            if values:
+                return finish(_pre_tax_from_total(max(values), text, allow_rate_only=True))
 
     for line in lines:
         low = line.lower()
@@ -1274,10 +1379,9 @@ def _money_from_text(text: str) -> str:
                     if 100000 <= val_int <= 50_000_000:
                         fmt_values.append(val_int)
             if fmt_values:
-                value = fmt_values[-1]
-                if _word_amount_should_override_number(value, word_val):
-                    return str(word_val)
-                return str(value)
+                # Dòng hàng có cả cột tiền thuế / thành tiền sau thuế -> lấy thành tiền trước thuế
+                picked = _pick_pre_tax(fmt_values, rate)
+                return finish(picked if picked != max(fmt_values) else fmt_values[-1])
             # Fallback: neu word_val hop le thi dung chu
             if word_val >= 100000:
                 return str(word_val)
@@ -1299,7 +1403,10 @@ def _money_from_text(text: str) -> str:
             continue
         section_values.extend(money_candidates(line))
     if section_values:
-        return str(section_values[-1])
+        picked = _pick_pre_tax(section_values, rate)
+        if picked != max(section_values):
+            return str(picked)
+        return str(_pre_tax_from_total(section_values[-1], text))
 
     return ""
 
@@ -1792,7 +1899,7 @@ def _money_from_amount_region_text(text: str) -> str:
                 val = int(amount)
                 if 100000 <= val <= 50_000_000:
                     values.append(val)
-    return str(max(values)) if values else ""
+    return str(_pick_pre_tax(values, _vat_rate_from_text(text))) if values else ""
 
 
 def _ocr_amount_from_pil_image(img, base_text: str = "") -> str:
@@ -1910,102 +2017,6 @@ def don_vi_mua_from_mst(mst, fallback_name: str = "") -> str:
     return str(fallback_name).strip()
 
 
-_KNOWN_PAGE_FIXES = {
-    "61E-03121_p1": {
-        "Tên đơn vị mua": "LH",
-        "Ký hiệu": "1K26TAN",
-        "Số hóa đơn": "7837",
-        "Ngày hóa đơn": "07/04/2026",
-        "Cộng tiền hàng": 700000,
-        "Biển số xe": "61E-031.21",
-        "Tên hàng hóa, dịch vụ": "Xăng",
-    },
-    "61E-03121_p3": {
-        "Tên đơn vị mua": "LH",
-        "Ký hiệu": "1K26TAN",
-        "Số hóa đơn": "7506",
-        "Ngày hóa đơn": "04/04/2026",
-        "Cộng tiền hàng": 670285,
-        "Biển số xe": "61E-031.21",
-        "Tên hàng hóa, dịch vụ": "Xăng",
-    },
-    "61E-03121_p4": {
-        "Tên đơn vị mua": "LH",
-        "Ký hiệu": "1K26TTK",
-        "Số hóa đơn": "4100",
-        "Ngày hóa đơn": "13/04/2026",
-        "Cộng tiền hàng": 800000,
-        "Biển số xe": "61E-031.21",
-        "Tên hàng hóa, dịch vụ": "Xăng",
-    },
-    "61E-03121_p5": {
-        "Tên đơn vị mua": "LH",
-        "Ký hiệu": "1K26TAN",
-        "Số hóa đơn": "7282",
-        "Ngày hóa đơn": "01/04/2026",
-        "Cộng tiền hàng": 850139,
-        "Biển số xe": "61E-031.21",
-        "Tên hàng hóa, dịch vụ": "Xăng",
-    },
-    "61E-03121_p6": {
-        "Tên đơn vị mua": "LH",
-        "Ký hiệu": "1K26TAN",
-        "Số hóa đơn": "8815",
-        "Ngày hóa đơn": "17/04/2026",
-        "Cộng tiền hàng": 780017,
-        "Biển số xe": "61E-031.29",
-        "Tên hàng hóa, dịch vụ": "Xăng",
-    },
-    "61E-03121_p7": {
-        "Tên đơn vị mua": "LH",
-        "Ký hiệu": "1K26TTK",
-        "Số hóa đơn": "12802",
-        "Ngày hóa đơn": "22/04/2026",
-        "Cộng tiền hàng": 740000,
-        "Biển số xe": "61E-031.21",
-        "Tên hàng hóa, dịch vụ": "Xăng",
-    },
-    "61E-03121_p8": {
-        "Tên đơn vị mua": "LH",
-        "Ký hiệu": "1K26TAN",
-        "Số hóa đơn": "8271",
-        "Ngày hóa đơn": "11/04/2026",
-        "Cộng tiền hàng": 600000,
-        "Biển số xe": "61E-031.21",
-        "Tên hàng hóa, dịch vụ": "Xăng",
-    },
-    "61E-03121_p9": {
-        "Tên đơn vị mua": "LH",
-        "Ký hiệu": "1K26TAN",
-        "Số hóa đơn": "8191",
-        "Ngày hóa đơn": "10/04/2026",
-        "Cộng tiền hàng": 600000,
-        "Biển số xe": "61E-031.21",
-        "Tên hàng hóa, dịch vụ": "Xăng",
-    },
-    "61E-03121_p10": {
-        "Tên đơn vị mua": "LH",
-        "Ký hiệu": "1K26TAN",
-        "Số hóa đơn": "7252",
-        "Ngày hóa đơn": "01/04/2026",
-        "Cộng tiền hàng": 850139,
-        "Biển số xe": "61E-031.21",
-        "Tên hàng hóa, dịch vụ": "Xăng",
-    },
-}
-
-
-def _apply_known_page_fix(row: dict) -> None:
-    ten_file = str(row.get("Ten file", "")).strip()
-    source_alias = str(row.get("_source_alias", "")).strip()
-    fix = _KNOWN_PAGE_FIXES.get(ten_file) or _KNOWN_PAGE_FIXES.get(source_alias)
-    if not fix:
-        return
-    row.update(fix)
-    source = str(row.get("Nguon", "")).strip()
-    row["Nguon"] = f"{source}+verified" if source else "verified"
-
-
 def _row_needs_image_fallback(row: dict, fields: list[str]) -> bool:
     return any(_needs_better_value(field, row.get(field)) for field in fields)
 
@@ -2068,16 +2079,23 @@ def _same_plate_number_different_ef(current: str, verified: str) -> bool:
 
 
 _VERIFY_TEXT_CACHE: dict = {}
+# Nhiều luồng cùng đọc/ghi bộ nhớ đệm này -> phải khóa, nếu không có thể lỗi
+# "dictionary changed size during iteration" và làm mất dòng của cả 1 file.
+_VERIFY_TEXT_LOCK = threading.Lock()
 
 def _verify_page_text(pdf_path: str, page_no: int) -> str:
     """[v26-A6] Render 250dpi + OCR vùng trang 1 lần cho mỗi (file, trang);
     2 hàm verify (biển số E/F và tiền bằng chữ) dùng chung kết quả."""
     key = (pdf_path, page_no)
-    if key not in _VERIFY_TEXT_CACHE:
-        img = convert_from_path(pdf_path, dpi=250, first_page=page_no, last_page=page_no)[0]
-        _VERIFY_TEXT_CACHE[key] = _ocr_page_image_text(img)
-        del img
-    return _VERIFY_TEXT_CACHE[key]
+    with _VERIFY_TEXT_LOCK:
+        if key in _VERIFY_TEXT_CACHE:
+            return _VERIFY_TEXT_CACHE[key]
+    img = convert_from_path(pdf_path, dpi=250, first_page=page_no, last_page=page_no)[0]
+    text = _ocr_page_image_text(img)                # OCR ngoài khóa để các luồng vẫn chạy song song
+    del img
+    with _VERIFY_TEXT_LOCK:
+        _VERIFY_TEXT_CACHE[key] = text
+    return text
 
 
 def _verify_ef_plate_from_pdf_render(pdf_path: str, rows: list[dict]) -> list[dict]:
@@ -2133,9 +2151,14 @@ def _verify_amount_words_from_pdf_render(pdf_path: str, rows: list[dict]) -> lis
         page_no = _page_number_from_row(row)
         try:
             verified_text = _verify_page_text(pdf_path, page_no)
-            words_amount = _parse_vn_words(verified_text)
+            words_total = _parse_vn_words(verified_text)
         except Exception:
             continue
+        # Tiền bằng chữ là số ĐÃ gồm VAT. Chênh lệch đúng bằng tiền VAT của số hiện có -> số hiện có đã đúng.
+        if words_total > current_amount and _vat_matches(current_amount, words_total - current_amount,
+                                                         _vat_rate_from_text(verified_text)):
+            continue
+        words_amount = _pre_tax_from_total(words_total, verified_text, allow_rate_only=True)
         if words_amount >= 100000 and words_amount != current_amount:
             row[amount_key] = str(words_amount)
             source = str(row.get("Nguon", "")).strip()
@@ -2166,8 +2189,6 @@ def finalize_clean_row(row: pd.Series) -> pd.Series:
         row["Tên hàng hóa, dịch vụ"] = "Dầu"
     elif hang_hoa == "Cần kiểm tra" and ky_hieu == "1K26TAN" and bien_so == "49H-040.14":
         row["Tên hàng hóa, dịch vụ"] = "Xăng"
-    elif ky_hieu in {"1C26MXD", "1K26TSK"}:
-        row["Tên hàng hóa, dịch vụ"] = "Xăng"
     return row
 
 
@@ -2178,8 +2199,9 @@ def extract_data(pdf_path: str) -> list[dict]:
     try:
         return _extract_data_with_verify(pdf_path)
     finally:
-        for k in [k for k in _VERIFY_TEXT_CACHE if k[0] == pdf_path]:
-            _VERIFY_TEXT_CACHE.pop(k, None)
+        with _VERIFY_TEXT_LOCK:
+            for k in [k for k in _VERIFY_TEXT_CACHE if k[0] == pdf_path]:
+                _VERIFY_TEXT_CACHE.pop(k, None)
 
 
 def _extract_data_with_verify(pdf_path: str) -> list[dict]:
@@ -2200,8 +2222,6 @@ def _extract_data_with_verify(pdf_path: str) -> list[dict]:
         rows = _improve_rows_from_pdf_render(pdf_path, rows, fields)
         rows = _verify_amount_words_from_pdf_render(pdf_path, rows)
         rows = _verify_ef_plate_from_pdf_render(pdf_path, rows)
-        for row in rows:
-            _apply_known_page_fix(row)
         return rows
 
     image_files = sorted(
@@ -2210,8 +2230,6 @@ def _extract_data_with_verify(pdf_path: str) -> list[dict]:
         if f.lower().endswith(IMAGE_EXTENSIONS)
     )
     if not image_files:
-        for row in rows:
-            _apply_known_page_fix(row)
         return rows
 
     existing_pages = {_page_number_from_row(row) for row in rows}
@@ -2259,8 +2277,6 @@ def _extract_data_with_verify(pdf_path: str) -> list[dict]:
             if not _is_blank_value(new_value) and _needs_better_value(field, row.get(field)):
                 row[field] = new_value
         row["Nguon"] = "text+image"
-    for row in rows:
-        _apply_known_page_fix(row)
     return rows
 
 
@@ -2302,7 +2318,6 @@ def extract_image_data(image_path: str, alias: str = "") -> list[dict]:
 
     if not OCR_AVAILABLE:
         blank["Nguon"] = "empty"
-        _apply_known_page_fix(blank)
         return [blank]
 
     try:
@@ -2329,11 +2344,9 @@ def extract_image_data(image_path: str, alias: str = "") -> list[dict]:
         if not any(not _is_blank_value(row.get(field)) for field in fields):
             row.update(blank)
             row["Nguon"] = "empty"
-        _apply_known_page_fix(row)
         return [row]
     except Exception as e:
         print(f"    [IMG ERROR] {file_name}: {e}")
-        _apply_known_page_fix(blank)
         return [blank]
 
 

@@ -36,7 +36,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_VERSION = "2.0.1"
+APP_VERSION = "2.0.2"
 APP_DIR = Path(__file__).resolve().parent
 HTML_NAME = "Bo_cong_cu_hoa_don.html"
 UI_CONFIG = APP_DIR / "app_ui.json"          # profile bạn thêm từ giao diện (không đụng tới app_config.json)
@@ -1416,9 +1416,12 @@ def open_folder(path):
 
 
 # ------------------------------------------------------------------ Petro: XML -> Ket_Qua.xlsx
+# "MST bên bán" (cuối bảng): chỉ có khi lấy từ XML; dùng để không gộp nhầm 2 người bán trùng ký hiệu + số
 KQ_COLUMNS = ["Ten file", "Nha phat hanh", "Loai PDF", "Tên đơn vị mua", "Mã số thuế bên mua", "Ký hiệu",
-              "Số hóa đơn", "Ngày hóa đơn", "Cộng tiền hàng", "Biển số xe", "Tên hàng hóa, dịch vụ", "Nguon"]
-KQ_WIDTHS = [32, 14, 10, 34, 16, 12, 12, 13, 16, 14, 22, 10]
+              "Số hóa đơn", "Ngày hóa đơn", "Cộng tiền hàng", "Biển số xe", "Tên hàng hóa, dịch vụ", "Nguon",
+              "MST bên bán"]
+KQ_WIDTHS = [32, 14, 10, 34, 16, 12, 12, 13, 16, 14, 22, 10, 16]
+KQ_TEXT_COLS = ("Mã số thuế bên mua", "Số hóa đơn", "MST bên bán")   # giữ dạng chữ (số 0 đầu)
 MST_TO_DON_VI = {  # giống bảng _MST_TO_DON_VI_MUA của v25
     "0309868627": "THP", "0313887686": "LH", "0319020723": "LH-THP",
     "0313655050": "S7", "0313073567": "HN", "0301450059": "Q3",
@@ -1549,14 +1552,16 @@ def parse_invoice_xml(path, issuer=None):
     tien = _to_int(_text(_find(root, "TToan"), "TgTCThue"))
     if tien is None:
         tien = sum(_to_int(_text(el, "ThTien")) or 0 for el in lines if _text(el, "TChat") in ("", "1")) or None
+    nban = _party(root, "NBan")
     if not issuer:
-        seller = no_accent(_text(_party(root, "NBan"), "Ten")).upper()
+        seller = no_accent(_text(nban, "Ten")).upper()
         issuer = "petrolimex" if "PETROLIMEX" in seller else "standard"
     return {
         "Ten file": "", "Nha phat hanh": issuer, "Loai PDF": "xml",
         "Tên đơn vị mua": don_vi, "Mã số thuế bên mua": mst, "Ký hiệu": ky_hieu,
         "Số hóa đơn": so_n, "Ngày hóa đơn": ngay, "Cộng tiền hàng": tien if tien is not None else "Cần kiểm tra",
         "Biển số xe": bien_so or "Không biển số", "Tên hàng hóa, dịch vụ": _hang_hoa(ten_hang), "Nguon": "xml",
+        "MST bên bán": re.sub(r"\s", "", _text(nban, "MST")),
         "_khhd": khhd.upper(),
     }
 
@@ -1577,6 +1582,53 @@ def _pdf_stem_for(row, pdf_stems, xml_stem):
 
 def _ascii_key(v):
     return no_accent(v).lower().strip()
+
+
+# ---- Lọc trùng hóa đơn: Tên đơn vị mua + Ký hiệu + Số hóa đơn (+ MST bên bán nếu có) ----
+# Ô trống ở 1 bên (vd dòng v25 không đọc được tên đơn vị / không có MST bên bán) được coi là khớp,
+# để số liệu XML vẫn thay được dòng quét PDF của cùng hóa đơn.
+_BLANK_NAMES = {"", "NAN", "NONE", "CAN KIEM TRA"}
+
+
+def _buyer_key(row):
+    mst = re.sub(r"\D", "", str(row.get("Mã số thuế bên mua") or ""))[:10]
+    name = MST_TO_DON_VI.get(mst) or row.get("Tên đơn vị mua")
+    key = re.sub(r"[^A-Z0-9]+", " ", no_accent(name).upper()).strip()
+    return "" if key in _BLANK_NAMES else key
+
+
+def _seller_key(row):
+    return re.sub(r"\D", "", str(row.get("MST bên bán") or ""))
+
+
+class _KqIndex:
+    """Tìm hóa đơn đã có theo Tên đơn vị mua + Ký hiệu + Số (+ MST bên bán)."""
+
+    def __init__(self):
+        self._by_key = {}
+
+    @staticmethod
+    def _ident(row):
+        return _buyer_key(row), _seller_key(row)
+
+    def find(self, row):
+        key = _kq_key(row.get("Ký hiệu"), row.get("Số hóa đơn"))
+        if not key[1]:
+            return None
+        mine = self._ident(row)
+        for other, ref in self._by_key.get(key, []):
+            if all(not a or not b or a == b for a, b in zip(mine, other)):
+                return ref
+        return None
+
+    def add(self, row, ref):
+        key = _kq_key(row.get("Ký hiệu"), row.get("Số hóa đơn"))
+        if key[1]:
+            self._by_key.setdefault(key, []).append((self._ident(row), ref))
+
+
+def _kq_row_at(ws, r, cols):
+    return {name: ws.cell(r, cols[name]).value for name in KQ_COLUMNS}
 
 
 def merge_petro_xml(pid, log):
@@ -1644,28 +1696,20 @@ def merge_petro_xml(pid, log):
                 cell.alignment = Alignment(horizontal="center", vertical="center")
                 ws.column_dimensions[cell.column_letter].width = KQ_WIDTHS[c - 1]
             ws.freeze_panes = "A2"
-        have = set()
+        have = _KqIndex()
         last = hdr
         for r in range(hdr + 1, (ws.max_row or hdr) + 1):
-            ky = str(ws.cell(r, cols["Ký hiệu"]).value or "").strip().upper()
-            so = str(ws.cell(r, cols["Số hóa đơn"]).value or "").strip().lstrip("0")
-            if ky or so or ws.cell(r, cols["Ten file"]).value:
+            old = _kq_row_at(ws, r, cols)
+            if old["Ký hiệu"] or old["Số hóa đơn"] or old["Ten file"]:
                 last = r
-            if so:
-                have.add((ky, so))
+            have.add(old, r)
         for f, row in parsed:
-            key = (row["Ký hiệu"], row["Số hóa đơn"])
-            if key in have:
+            if have.find(row):
                 res["existing"] += 1
                 continue
-            have.add(key)
             last += 1
-            for name in KQ_COLUMNS:
-                cell = ws.cell(last, cols[name], row[name])
-                if name in ("Mã số thuế bên mua", "Số hóa đơn"):
-                    cell.number_format = "@"
-                elif name == "Cộng tiền hàng" and isinstance(row[name], int):
-                    cell.number_format = "#,##0"
+            have.add(row, last)
+            _kq_write_row(ws, last, cols, row)
             res["added"] += 1
         wb.save(kq)
     except PermissionError:
@@ -1736,7 +1780,7 @@ def _kq_open(path, create=True):
 def _kq_write_row(ws, r, cols, row, only=None):
     for name in (only or KQ_COLUMNS):
         cell = ws.cell(r, cols[name], row.get(name, ""))
-        if name in ("Mã số thuế bên mua", "Số hóa đơn"):
+        if name in KQ_TEXT_COLS:
             cell.number_format = "@"
         elif name == "Cộng tiền hàng" and isinstance(row.get(name), int):
             cell.number_format = "#,##0"
@@ -1784,17 +1828,15 @@ def sync_xml_rows(kq, rows, log):
         return 0, 0
     kq = Path(kq)
     wb, ws, hdr, cols = _kq_open(kq)
-    index, last = {}, hdr
+    index, last = _KqIndex(), hdr
     for r in range(hdr + 1, (ws.max_row or hdr) + 1):
-        ky, so, tf = ws.cell(r, cols["Ký hiệu"]).value, ws.cell(r, cols["Số hóa đơn"]).value, ws.cell(r, cols["Ten file"]).value
-        if ky or so or tf:
+        old = _kq_row_at(ws, r, cols)
+        if old["Ký hiệu"] or old["Số hóa đơn"] or old["Ten file"]:
             last = r
-        if so not in (None, ""):
-            index.setdefault(_kq_key(ky, so), r)
+        index.add(old, r)
     added = replaced = filled = 0
     for row in rows:
-        key = _kq_key(row.get("Ký hiệu"), row.get("Số hóa đơn"))
-        r = index.get(key)
+        r = index.find(row)
         if r:
             if str(ws.cell(r, cols["Nguon"]).value or "").strip().lower() == "xml":
                 filled += 1 if _kq_fill_blanks(ws, r, cols, row) else 0
@@ -1811,7 +1853,7 @@ def sync_xml_rows(kq, rows, log):
         else:
             last += 1
             _kq_write_row(ws, last, cols, row)
-            index[key] = last
+            index.add(row, last)
             added += 1
     if added or replaced or filled:
         wb.save(kq)
@@ -1969,7 +2011,7 @@ def build_tong_hop(pid, log):
     sources = [("Petrolimex", paths["petro_download_dir"] / "Ket_Qua.xlsx" if paths["petro_download_dir"] else None),
                ("Các hãng khác", folder / CAC_DIR / "Ket_Qua.xlsx"),
                ("Không có XML (v25)", folder / KHONG_DIR / "Ket_Qua.xlsx")]
-    seen, out, counts = set(), [], {}
+    seen, out, counts = _KqIndex(), [], {}
     for group, src in sources:
         if not src:
             continue
@@ -1979,13 +2021,11 @@ def build_tong_hop(pid, log):
             log("[XML-HD] Không đọc được %s: %r (bỏ qua khi tổng hợp)" % (src, e), "err")
             continue
         for row in rows:
-            key = _kq_key(row.get("Ký hiệu"), row.get("Số hóa đơn"))
             if group.startswith("Không có XML") and row.get("Ten file") and str(row["Ten file"]) not in kh_stems:
                 continue                                   # PDF này đã có XML và chuyển sang Cac_hang_khac
-            if key[1] and key in seen:
-                continue
-            if key[1]:
-                seen.add(key)
+            if seen.find(row):
+                continue                                   # trùng Tên đơn vị + Ký hiệu + Số với dòng đã lấy
+            seen.add(row, True)
             out.append((group, row))
             counts[group] = counts.get(group, 0) + 1
     target = folder / TONG_HOP
@@ -2003,7 +2043,7 @@ def build_tong_hop(pid, log):
     for group, row in out:
         ws.append([group] + [row.get(n, "") for n in KQ_COLUMNS])
         rr = ws.max_row
-        for name in ("Mã số thuế bên mua", "Số hóa đơn"):
+        for name in KQ_TEXT_COLS:
             ws.cell(rr, heads.index(name) + 1).number_format = "@"
         if isinstance(row.get("Cộng tiền hàng"), (int, float)):
             ws.cell(rr, heads.index("Cộng tiền hàng") + 1).number_format = "#,##0"
@@ -2112,19 +2152,19 @@ def merge_invoice_xml(folder, log, kq_name="Ket_Qua.xlsx"):
             # 1) lưu vào kho trước -> an toàn để xóa XML
             try:
                 wb, ws, hdr, cols = _kq_open(store)
-                have, last = {}, hdr
+                have, last = _KqIndex(), hdr
                 for r in range(hdr + 1, (ws.max_row or hdr) + 1):
-                    so = ws.cell(r, cols["Số hóa đơn"]).value
-                    if so not in (None, ""):
-                        have[_kq_key(ws.cell(r, cols["Ký hiệu"]).value, so)] = r
+                    old = _kq_row_at(ws, r, cols)
+                    if any(v not in (None, "") for v in old.values()):
                         last = r
+                    have.add(old, r)
                 for f, row in parsed:
-                    key = _kq_key(row["Ký hiệu"], row["Số hóa đơn"])
-                    if key in have:
-                        _kq_fill_blanks(ws, have[key], cols, row)
+                    r = have.find(row)
+                    if r:
+                        _kq_fill_blanks(ws, r, cols, row)
                         continue
-                    have[key] = last + 1
                     last += 1
+                    have.add(row, last)
                     _kq_write_row(ws, last, cols, row)
                 wb.save(store)
             except Exception as e:
