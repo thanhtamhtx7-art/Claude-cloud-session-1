@@ -36,7 +36,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_VERSION = "2.0.4"
+APP_VERSION = "2.0.5"
 APP_DIR = Path(__file__).resolve().parent
 HTML_NAME = "Bo_cong_cu_hoa_don.html"
 UI_CONFIG = APP_DIR / "app_ui.json"          # profile bạn thêm từ giao diện (không đụng tới app_config.json)
@@ -2258,6 +2258,129 @@ def import_petro_codes(pid, items, source):
     return {"added": added, "existed": existed, "invalid": invalid}
 
 
+# ---- Chuyển mã nhập thủ công của bản cũ (<= 2.0.3, ghi vào sổ profile Gmail) sang khu riêng ----
+MANUAL_ID_PREFIX = "nhap-tay-"
+
+
+def old_manual_codes():
+    """{profile: số mã nhập thủ công từ bản cũ còn nằm trong sổ của profile Gmail}."""
+    out = {}
+    for p in all_profiles():
+        st = profile_paths(p["id"])["state"]
+        if not st or not st.exists():
+            continue
+        try:
+            conn = db_connect(st)
+            try:
+                if "message_id" in table_cols(conn, "petro_invoices"):
+                    n = conn.execute("SELECT COUNT(*) FROM petro_invoices WHERE message_id LIKE ?",
+                                     (MANUAL_ID_PREFIX + "%",)).fetchone()[0]
+                    if n:
+                        out[p["id"]] = n
+            finally:
+                conn.close()
+        except Exception:
+            pass
+    return out
+
+
+def _writable(path):
+    """False nếu file đang bị khóa (vd đang mở trong Excel trên Windows)."""
+    try:
+        with open(path, "r+b"):
+            return True
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+
+
+def migrate_old_manual_codes(log):
+    """Chuyển mã nhập thủ công cũ từ sổ các profile sang khu Petro_thu_cong:
+    dòng trong sổ (giữ trạng thái đã tải / lỗi...), PDF đã tải và dòng tương ứng trong Ket_Qua.xlsx.
+    File tổng Petro không bị sửa. Trả về số liệu đã chuyển."""
+    es = load_email_state()
+    mpaths = profile_paths(PETRO_MANUAL_ID)
+    mdir = Path(mpaths["download_dir"])
+    mdir.mkdir(parents=True, exist_ok=True)
+    es.EmailState(str(mpaths["state"])).close()            # tạo sổ khu riêng với đủ cột
+    dst_kq = mdir / "Ket_Qua.xlsx"
+    total = {"codes": 0, "pdf": 0, "kq": 0, "master": 0, "profiles": []}
+    for pid in old_manual_codes():
+        pp = profile_paths(pid)
+        src_kq = (Path(pp["petro_download_dir"]) / "Ket_Qua.xlsx") if pp["petro_download_dir"] else None
+        locked = [str(f) for f in (src_kq, dst_kq) if f and f.exists() and not _writable(f)]
+        if locked:
+            log("[CHUYỂN] %s đang mở trong Excel -> chưa chuyển gì của profile %s. Đóng file rồi bấm lại." % (", ".join(locked), pid), "err")
+            continue
+        src = sqlite3.connect(str(pp["state"]), timeout=10)
+        src.row_factory = sqlite3.Row
+        dst = sqlite3.connect(str(mpaths["state"]), timeout=10)
+        try:
+            rows = [dict(r) for r in src.execute("SELECT * FROM petro_invoices WHERE message_id LIKE ?", (MANUAL_ID_PREFIX + "%",))]
+            dcols = [r[1] for r in dst.execute("PRAGMA table_info(petro_invoices)")]
+            have = {r[0] for r in dst.execute("SELECT message_id FROM petro_invoices")}
+            renamed, n_pdf = {}, 0                          # tên PDF cũ (không đuôi) -> tên mới trong thư mục riêng
+            for r in rows:
+                pf = r.get("pdf_file")
+                if pf and str(r.get("pdf_status") or "").upper() == "DONE":
+                    f = Path(pf) if Path(pf).is_absolute() else Path(pp["download_dir"]) / pf
+                    if f.is_file():
+                        t = _move_pdf(f, mdir)
+                        renamed[f.stem] = t.stem
+                        r["pdf_file"] = t.name              # đường dẫn tương đối so với thư mục khu riêng
+                        n_pdf += 1
+                if r.get("master_synced"):
+                    total["master"] += 1
+                if r["message_id"] not in have:             # đã có ở khu riêng (nhập 2 lần) thì chỉ xóa bên profile
+                    cols = [c for c in dcols if c in r]
+                    dst.execute("INSERT INTO petro_invoices (%s) VALUES (%s)" % (",".join(cols), ",".join("?" * len(cols))),
+                                [r[c] for c in cols])
+            dst.commit()
+            n_kq = 0
+            if renamed and src_kq and src_kq.exists():      # dòng Ket_Qua.xlsx (ráp từ XML) của các PDF vừa chuyển
+                try:
+                    wb, ws, hdr, cols = _kq_open(src_kq, create=False)
+                    take = [r for r in range(hdr + 1, (ws.max_row or hdr) + 1)
+                            if str(ws.cell(r, cols["Ten file"]).value or "").strip() in renamed]
+                    if take:
+                        dwb, dws, dhdr, dcl = _kq_open(dst_kq)
+                        idx, last = _KqIndex(), dhdr
+                        for rr in range(dhdr + 1, (dws.max_row or dhdr) + 1):
+                            old = _kq_row_at(dws, rr, dcl)
+                            if any(v not in (None, "") for v in old.values()):
+                                last = rr
+                            idx.add(old, rr)
+                        for rr in take:
+                            row = {k: ("" if v is None else v) for k, v in _kq_row_at(ws, rr, cols).items()}
+                            row["Ten file"] = renamed[str(row["Ten file"]).strip()]
+                            if not idx.find(row):
+                                last += 1
+                                _kq_write_row(dws, last, dcl, row)
+                                idx.add(row, last)
+                        dwb.save(dst_kq)
+                        for rr in sorted(take, reverse=True):
+                            ws.delete_rows(rr)
+                        wb.save(src_kq)
+                        n_kq = len(take)
+                except Exception as e:
+                    log("[CHUYỂN] Không chuyển được dòng Ket_Qua.xlsx của profile %s: %r (PDF và mã vẫn đã chuyển)." % (pid, e), "err")
+            ids = [(r["message_id"],) for r in rows]
+            src.executemany("DELETE FROM petro_invoices WHERE message_id=?", ids)
+            if "message_id" in table_cols(src, "emails"):
+                src.executemany("DELETE FROM emails WHERE message_id=?", ids)
+            src.commit()
+            total["codes"] += len(rows)
+            total["pdf"] += n_pdf
+            total["kq"] += n_kq
+            total["profiles"].append(pid)
+            log("[CHUYỂN] Profile %s: %d mã, %d PDF, %d dòng Ket_Qua.xlsx -> %s" % (pid, len(rows), n_pdf, n_kq, mdir), "out")
+        finally:
+            src.close()
+            dst.close()
+    return total
+
+
 # ------------------------------------------------------------------ HTTP
 class Handler(BaseHTTPRequestHandler):
     server_version = "HoaDonApp/" + APP_VERSION
@@ -2455,6 +2578,14 @@ class Handler(BaseHTTPRequestHandler):
                         ui.pop("v25_path", None)
                     save_ui(ui)
                 return self._send(200, self.info())
+            if u.path == "/api/petro/migrate-manual":
+                cur = CURRENT["job"]
+                if cur is not None and cur.status == "running":
+                    raise RuntimeError("Đang chạy \"%s\". Chờ chạy xong rồi thử lại." % cur.title)
+                msgs = []
+                res = migrate_old_manual_codes(lambda text, kind="out": msgs.append({"text": text, "kind": kind}))
+                res["messages"] = msgs
+                return self._send(200, res)
             if u.path == "/api/petro/manual-dir":
                 path = str(body.get("path") or "").strip().strip('"')[:500]
                 if path:
@@ -2554,7 +2685,8 @@ class Handler(BaseHTTPRequestHandler):
                     "features": main_features(), "ddddocr": DDDDOCR["ok"], "windows": os.name == "nt",
                     "v25": str(find_v25() or ""), "cpu": os.cpu_count() or 1,
                     "petro_manual": {"id": PETRO_MANUAL_ID, "dir": str(petro_manual_dir()),
-                                     "custom": bool(ui.get("petro_manual_dir"))}},
+                                     "custom": bool(ui.get("petro_manual_dir")),
+                                     "old": old_manual_codes()}},   # mã nhập thủ công cũ còn trong sổ profile
             "profiles": [profile_status(p) for p in all_profiles()],
             "last_profile": ui.get("last_profile") or DEFAULT_PROFILES[0],
             "job": cur.summary() if cur else None,

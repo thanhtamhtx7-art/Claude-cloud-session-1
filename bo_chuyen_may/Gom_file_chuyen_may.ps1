@@ -97,7 +97,8 @@ if ((Test-Path $Dich) -and @(Get-ChildItem $Dich -Force).Count -gt 0) {
     exit 1
 }
 if (-not $PSBoundParameters.ContainsKey("KemDuLieu")) {
-    $KemDuLieu = Hoi-CoKhong "PC mới vẫn đọc CÁC GMAIL CŨ (chép kèm sổ theo dõi state\, downloads\, outputs\)?" $true
+    # -KhongHoi: KHÔNG kèm dữ liệu (đúng như mô tả tham số ở đầu file; trước đây lại lấy mặc định "Có")
+    $KemDuLieu = if ($KhongHoi) { $false } else { Hoi-CoKhong "PC mới vẫn đọc CÁC GMAIL CŨ (chép kèm sổ theo dõi state\, downloads\, outputs\)?" $true }
 }
 $fileTong = "D:\Làm việc\hđ đang xử lý\hoa_don_petrolimex_tong_hop_down.xlsx"
 if (-not $PSBoundParameters.ContainsKey("KemFileTongPetro")) {
@@ -132,12 +133,14 @@ foreach ($f in @("email_state.py", "Chay_giao_dien.bat", "app_config.json")) {
 
 # v25: giao diện chạy file v25 đã lưu trong app_ui.json (v25_path) - có thể nằm NGOÀI thư mục code.
 # Lấy bản sửa gần nhất trong: đường dẫn đã lưu / cạnh main.py / thư mục dự án.
-$v25DaLuu = ""
+$uiCfg = $null                                    # app_ui.json của PC cũ (không chép sang, chỉ đọc vài mục)
 foreach ($ui in @((Join-Path $chon.Dir "app_ui.json"), (Join-Path $Goc "app_ui.json"))) {
-    if (-not $v25DaLuu -and (Test-Path $ui)) {
-        try { $v25DaLuu = [string]((Get-Content $ui -Raw -Encoding UTF8 | ConvertFrom-Json).v25_path) } catch { }
+    if (-not $uiCfg -and (Test-Path $ui)) {
+        try { $uiCfg = Get-Content $ui -Raw -Encoding UTF8 | ConvertFrom-Json } catch { }
     }
 }
+$v25DaLuu = if ($uiCfg) { [string]$uiCfg.v25_path } else { "" }
+$petroThuCong = if ($uiCfg) { [string]$uiCfg.petro_manual_dir } else { "" }   # thư mục mã Petro nhập thủ công đã đổi
 $v25 = Moi-Nhat @($v25DaLuu, (Join-Path $chon.Dir "v25.py"), (Join-Path $Goc "v25.py"))
 if ($v25) {
     Chep $v25 "v25.py"                            # luôn đặt tên v25.py cạnh main.py để PC mới tự tìm thấy
@@ -167,6 +170,26 @@ if ($KemDuLieu) {
             # Chép nguyên thư mục, kể cả *.db-wal nếu có: file này có thể còn dữ liệu CHƯA ghi vào *.db
             # (vì vậy nên tắt chương trình trước khi gom, xem bước 2b).
         }
+    }
+}
+# ---------- 5b. Thư mục mã Petrolimex nhập thủ công (app.py 2.0.4+) ----------
+# Mặc định nằm trong downloads\Petro_thu_cong (đã chép ở trên nếu kèm dữ liệu). Nếu đã đổi sang thư mục khác
+# thì đường dẫn đó nằm trong app_ui.json - file KHÔNG được chép, nên PC mới quay về downloads\Petro_thu_cong
+# -> chép thư mục đã đổi vào đúng chỗ đó.
+if ($petroThuCong) {
+    $pt = if ([IO.Path]::IsPathRooted($petroThuCong)) { $petroThuCong } else { Join-Path $chon.Dir $petroThuCong }
+    if (-not (Test-Path -LiteralPath $pt)) {
+        $canhBao.Add("Không thấy thư mục mã Petrolimex nhập thủ công: $pt -> không chép.")
+    } elseif ($KemDuLieu) {
+        $macDinh = Join-Path $Dich "downloads\Petro_thu_cong"
+        if (Test-Path -LiteralPath $macDinh) {       # thư mục mặc định cũ (dùng trước khi đổi) -> giữ lại, đổi tên
+            Rename-Item -LiteralPath $macDinh ("Petro_thu_cong_cu_" + (Get-Date -Format "yyyyMMdd_HHmmss"))
+        }
+        Chep $pt "Petro_thu_cong" "downloads"
+        $canhBao.Add("Thư mục mã Petrolimex nhập thủ công ($pt) đã chép vào downloads\Petro_thu_cong - PC mới dùng thư mục này.")
+    } else {
+        $canhBao.Add("CHƯA chép thư mục mã Petrolimex nhập thủ công ($pt) vì không kèm dữ liệu. " +
+                     "Tự chép thư mục đó vào downloads\Petro_thu_cong trên PC mới (và chép state\processed_Petro_thu_cong.db vào state\).")
     }
 }
 if ($KemFileTongPetro) {

@@ -3809,8 +3809,25 @@ window.SAMPLE_INVOICES = [
     var DIR = { edit: false, val: '', err: '', busy: false };
     var dirRegion = U.region(function (region) {
       var m = Local.petroManual();
+      // Mã nhập thủ công từ bản cũ còn nằm trong sổ profile Gmail -> nút chuyển sang khu riêng
+      var old = m.old || {}, oldIds = Object.keys(old), oldN = oldIds.reduce(function (t, k) { return t + old[k]; }, 0);
+      var oldBanner = oldN ? U.banner('warn', 'Còn ' + oldN + ' mã nhập thủ công từ bản cũ nằm trong sổ profile ' + oldIds.map(function (k) { return k + ' (' + old[k] + ')'; }).join(', ') + '.',
+        'Chuyển sang khu riêng: mã (giữ trạng thái đã tải / lỗi), PDF đã tải và dòng Ket_Qua.xlsx tương ứng. Hóa đơn từ email và file tổng Petro không bị sửa.',
+        h('button.btn.sm', { type: 'button', style: 'margin-left:8px', disabled: Local.running() || DIR.busy, onclick: async function () {
+          if (!root.confirm('Chuyển ' + oldN + ' mã nhập thủ công cũ sang thư mục riêng?\nNên đóng Ket_Qua.xlsx nếu đang mở trong Excel.')) return;
+          DIR.busy = true; region.update();
+          try {
+            var r = await Local.api('/api/petro/migrate-manual', {});
+            U.toast((r.messages || []).map(function (x) { return x.text; }).join(' ') || 'Không có mã nào cần chuyển');
+            await Local.refresh();
+            LS.src = 'manual'; srcChips.update(); headText.update();
+            await loadLocalPetro(listRegion);
+            if (r.codes && !Local.running()) runLocal('export_petro', {});   // dựng lại Excel danh sách của khu riêng
+          } catch (e) { U.toast(e.message); }
+          DIR.busy = false; region.update();
+        } }, 'Chuyển sang khu riêng')) : null;
       if (!DIR.edit) {
-        return h('div', { style: 'display:flex;flex-direction:column;gap:8px' },
+        return h('div', { style: 'display:flex;flex-direction:column;gap:8px' }, oldBanner,
           h('div', h('b', 'Thư mục lưu mã nhập thủ công'), h('div.mono', { style: 'overflow-wrap:anywhere' }, m.dir || '(chưa có thông tin)')),
           h('div.foot-note', 'PDF, Ket_Qua.xlsx, Excel danh sách và file lỗi của mã nhập thủ công lưu tại đây, tách khỏi thư mục tải của các profile Gmail. Không đối chiếu và không ghi vào file tổng Petro.'),
           h('div', { style: 'display:flex;gap:10px;flex-wrap:wrap' },
