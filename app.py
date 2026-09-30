@@ -36,7 +36,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_VERSION = "2.0.2"
+APP_VERSION = "2.0.3"
 APP_DIR = Path(__file__).resolve().parent
 HTML_NAME = "Bo_cong_cu_hoa_don.html"
 UI_CONFIG = APP_DIR / "app_ui.json"          # profile bạn thêm từ giao diện (không đụng tới app_config.json)
@@ -87,8 +87,7 @@ V25_NAMES = ("v25.py", "scan_pdf_v26.py", "scan_pdf_v25.py", "v26.py", "scan_pdf
 V25_FIX = r"""
 import glob, json, re, time, unicodedata
 
-FIX_KNOWN = {"0309868627": "THP", "0313887686": "LH", "0319020723": "LH-THP",
-             "0313655050": "S7", "0313073567": "HN", "0301450059": "Q3"}
+FIX_KNOWN = {}   # MST -> tên viết tắt: nạp từ bảng của v25 + MST_TO_DON_VI của app.py (UI_MST_TABLE)
 FIX_NAMES = [
     ("CONG TY TNHH THUONG MAI VAN TAI XAY DUNG THIEN HOANG", "0309868627"),
     ("LIEN HIEP HOP TAC XA VAN TAI THIEN HOANG PHAT", "0319020723"),
@@ -1056,7 +1055,7 @@ def run_job(job):
                 v25p, folder, out, skip, workers = args[:5]
                 fix = args[5] if len(args) > 5 else True
                 cmd = [Settings.python, "-u", "-c", v25_runner_code(), v25p, folder, out, "1" if skip else "0", "1" if fix else "0"]
-                env["UI_MST_TABLE"] = json.dumps(load_ui().get("mst_table") or {}, ensure_ascii=False)
+                env["UI_MST_TABLE"] = json.dumps(dict(MST_TO_DON_VI, **(load_ui().get("mst_table") or {})), ensure_ascii=False)
                 job.add("$ python %s  (quét thư mục %s, %s luồng)" % (Path(v25p).name, folder, workers), kind="cmd")
                 env["INVOICE_WORKERS"] = str(workers)
                 try:
@@ -1428,7 +1427,8 @@ KQ_COLUMNS = ["Ten file", "Nha phat hanh", "Loai PDF", "Tên đơn vị mua", "M
               "MST bên bán"]
 KQ_WIDTHS = [32, 14, 10, 34, 16, 12, 12, 13, 16, 14, 22, 10, 16]
 KQ_TEXT_COLS = ("Mã số thuế bên mua", "Số hóa đơn", "MST bên bán")   # giữ dạng chữ (số 0 đầu)
-MST_TO_DON_VI = {  # giống bảng _MST_TO_DON_VI_MUA của v25
+MST_TO_DON_VI = {  # MST bên mua -> tên viết tắt. Bảng DUY NHẤT của app.py (cũng truyền cho bước sửa MST sau v25).
+    # v25.py có bảng _MST_TO_DON_VI_MUA riêng vì v25 chạy được độc lập - thêm công ty mới thì sửa cả 2 nơi.
     "0309868627": "THP", "0313887686": "LH", "0319020723": "LH-THP",
     "0313655050": "S7", "0313073567": "HN", "0301450059": "Q3",
 }
@@ -1899,31 +1899,6 @@ def _dup_row_for(stem, rows, cac_stems):
     return None
 TONG_HOP = "Tong_hop_ket_qua.xlsx"
 
-def _email_by_file(folder):
-    """Tên file PDF -> thông tin email (lấy từ sổ theo dõi của profile có thư mục tải này)."""
-    out = {}
-    try:
-        target = os.path.normcase(str(Path(folder).resolve()))
-        for p in all_profiles():
-            paths = profile_paths(p["id"])
-            dl = paths.get("download_dir")
-            if not dl or os.path.normcase(str(Path(dl).resolve())) != target or not paths["state"] or not Path(paths["state"]).exists():
-                continue
-            conn = sqlite3.connect("file:%s?mode=ro" % Path(paths["state"]).as_posix(), uri=True)
-            try:
-                for mid, sup, subj, md, files in conn.execute("SELECT message_id, supplier, subject, mail_date, files FROM emails"):
-                    try:
-                        names = json.loads(files or "[]")
-                    except Exception:
-                        names = []
-                    for n in names if isinstance(names, list) else []:
-                        out.setdefault(str(n), {"id": mid, "supplier": sup or "", "subject": subj or "", "date": md or ""})
-            finally:
-                conn.close()
-    except Exception:
-        pass
-    return out
-
 
 def _same_file(a, b):
     try:
@@ -2372,20 +2347,22 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("Tên profile chỉ gồm chữ không dấu, số, dấu gạch dưới, gạch ngang hoặc dấu chấm (tối đa 40 ký tự)")
                 email = str(body.get("email") or "").strip()[:120]
                 ddir = str(body.get("download_dir") or "").strip()[:500]
-                ui = load_ui()
-                existing = [p for p in ui["profiles"] if str(p.get("id", "")).lower() == pid.lower()]
-                if existing:
-                    existing[0].update({"email": email or existing[0].get("email", ""), "download_dir": ddir})
-                else:
-                    ui["profiles"].append({"id": pid, "email": email, "download_dir": ddir})
-                ui["last_profile"] = pid
-                save_ui(ui)
+                with _UI_LOCK:                       # đọc-sửa-ghi trọn trong khóa, không ghi đè thay đổi của luồng khác
+                    ui = load_ui()
+                    existing = [p for p in ui["profiles"] if str(p.get("id", "")).lower() == pid.lower()]
+                    if existing:
+                        existing[0].update({"email": email or existing[0].get("email", ""), "download_dir": ddir})
+                    else:
+                        ui["profiles"].append({"id": pid, "email": email, "download_dir": ddir})
+                    ui["last_profile"] = pid
+                    save_ui(ui)
                 return self._send(200, self.info())
             if u.path == "/api/profiles/remove":
                 pid = str(body.get("id") or "")
-                ui = load_ui()
-                ui["profiles"] = [p for p in ui["profiles"] if str(p.get("id", "")).lower() != pid.lower()]
-                save_ui(ui)
+                with _UI_LOCK:
+                    ui = load_ui()
+                    ui["profiles"] = [p for p in ui["profiles"] if str(p.get("id", "")).lower() != pid.lower()]
+                    save_ui(ui)
                 return self._send(200, self.info())
             if u.path in ("/api/petro/import", "/api/petro/merge-xml"):
                 pid = str(body.get("profile") or "")
@@ -2428,7 +2405,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, res)
             if u.path == "/api/v25/config":
                 path = str(body.get("path") or "").strip().strip('"')
-                ui = load_ui()
+                pth = None
                 if path:
                     pth = Path(path)
                     if pth.is_dir():
@@ -2438,17 +2415,21 @@ class Handler(BaseHTTPRequestHandler):
                         pth = cands[0]
                     if not pth.is_file() or pth.suffix.lower() != ".py":
                         raise ValueError("Không thấy file .py: %s" % path)
-                    ui["v25_path"] = str(pth)
-                else:
-                    ui.pop("v25_path", None)
-                save_ui(ui)
+                with _UI_LOCK:
+                    ui = load_ui()
+                    if pth:
+                        ui["v25_path"] = str(pth)
+                    else:
+                        ui.pop("v25_path", None)
+                    save_ui(ui)
                 return self._send(200, self.info())
             if u.path == "/api/prefs":
-                ui = load_ui()
                 pid = str(body.get("last_profile") or "")
                 if PROFILE_RE.match(pid):
-                    ui["last_profile"] = pid
-                    save_ui(ui)
+                    with _UI_LOCK:
+                        ui = load_ui()
+                        ui["last_profile"] = pid
+                        save_ui(ui)
                 return self._send(200, {"ok": True})
             if u.path == "/api/open":
                 pid = str(body.get("profile") or "")

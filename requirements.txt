@@ -1,0 +1,27 @@
+# Thư viện Python của Bộ công cụ hóa đơn - ghi cố định phiên bản để máy nào cài cũng giống nhau.
+# Cài: python -m pip install -r requirements.txt   (Cai_dat.bat tự làm bước này)
+# Các bản dưới đây đều có sẵn cho Windows + Python 3.14.
+# Muốn chép ĐÚNG phiên bản đang chạy ổn trên máy cũ: trên máy cũ chạy
+#     python -m pip freeze > requirements_may_cu.txt
+# rồi dùng file đó thay cho file này.
+
+# Gmail API + đăng nhập Google
+google-api-python-client==2.200.0
+google-auth==2.59.0
+google-auth-oauthlib==1.5.0
+
+# Trình duyệt tự động (tải hóa đơn qua link, tra cứu Petrolimex)
+playwright==1.63.0
+
+# Đọc email HTML, ghi/đọc Excel
+beautifulsoup4==4.15.0
+openpyxl==3.1.5
+pandas==2.3.3
+
+# v25: đọc PDF, OCR PDF dạng ảnh (cần thêm Tesseract + Poppler cài riêng, xem HUONG_DAN_CHUYEN_MAY.txt)
+pdfplumber==0.11.10
+pytesseract==0.3.13
+pdf2image==1.17.0
+pillow==12.3.0
+
+# ddddocr (tự giải CAPTCHA Petrolimex) cài riêng trong Cai_dat.bat: cài lỗi cũng không chặn các bước khác

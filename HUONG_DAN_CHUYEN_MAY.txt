@@ -29,6 +29,7 @@ A. TRÊN PC CŨ: GOM FILE
 Thư mục sau khi gom gồm:
    main.py, quet_email.py, email_state.py, app.py, v25.py
    Bo_cong_cu_hoa_don.html, Chay_giao_dien.bat, Cai_dat.bat
+   requirements.txt         (phiên bản thư viện Python - Cai_dat.bat cài theo file này)
    app_config.json          (danh sách profile, đường dẫn tương đối nên đổi thư mục vẫn chạy)
    tokens\                  (TRỐNG - token mới tạo ở bước E)
    state\, downloads\, outputs\   (chỉ khi chọn kèm dữ liệu)
@@ -69,8 +70,8 @@ C. CÀI ĐẶT TRÊN PC MỚI
    (vd D:\Bo_cong_cu_hoa_don). Tránh để chung trong OneDrive với PC cũ nếu 2 máy
    cùng chạy: sổ theo dõi (state\*.db) dễ bị xung đột khi 2 máy cùng ghi.
 3. Đặt credentials.json (bước B) vào thư mục đó, CẠNH main.py.
-4. Bấm đúp Cai_dat.bat -> cài thư viện Python + trình duyệt Chromium (cần Internet,
-   mất vài phút). Cuối cùng cửa sổ hiện bảng kiểm tra, phải thấy "Thư viện chính: OK".
+4. Bấm đúp Cai_dat.bat -> cài thư viện Python (đúng phiên bản trong requirements.txt)
+   + trình duyệt Chromium (cần Internet, mất vài phút). Cuối cùng cửa sổ hiện bảng kiểm tra, phải thấy "Thư viện chính: OK".
 5. (Chỉ khi dùng v25 quét PDF DẠNG ẢNH) cài thêm:
    - Tesseract OCR: https://github.com/UB-Mannheim/tesseract/wiki
      (khi cài chọn thêm ngôn ngữ Vietnamese), thêm thư mục cài vào PATH.
@@ -90,6 +91,9 @@ Mặc định chương trình dùng:
   (dùng 2 dấu \\ trong đường dẫn). Muốn tắt lọc trùng theo file tổng: "petro_master": ""
 - Gmail của CÔNG TY KHÁC: nên cho profile đó 1 file tổng Petro RIÊNG (như trên)
   để hóa đơn không bị gộp chung.
+- (Chỉ khi dùng Tool_Convert) v25 tìm ảnh gốc ở <tools.root>\Tool_Convert\input, lấy từ mục
+  "tools" -> "root" trong app_config.json. Sửa "root" thành thư mục project trên PC mới,
+  vd "root": "D:/project" (dùng dấu / hoặc \\).
 
 
 ----------------------------------------------------------------------

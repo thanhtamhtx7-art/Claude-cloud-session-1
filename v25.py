@@ -81,9 +81,6 @@ def no_accent(s: str) -> str:
     s = unicodedata.normalize("NFD", s)
     return re.sub(r"[\u0300-\u036f\u1dc0-\u1dff\u20d0-\u20ff]", "", s)
 
-def num_ok(val: str, min_val: int = 1000) -> bool:
-    n = re.sub(r"[\s.,]", "", val)
-    return n.isdigit() and int(n) >= min_val
 
 def cut_at_mst(val: str) -> str:
     return re.split(
@@ -120,31 +117,6 @@ def _ocr_image(img) -> str:
         pass
     return ""
 
-def detect_pdf(pdf_path: str, pdf) -> tuple[str, str, str]:
-    full_text = "\n".join(page.extract_text() or "" for page in pdf.pages)
-    if full_text.strip():
-        issuer = "petrolimex" if _PLX_RE.search(full_text[:_HEADER_CHARS]) else "standard"
-        return issuer, "text", full_text
-    return "unknown", "image", ""
-
-
-def looks_like_invoice_page(text: str) -> bool:
-    if not text or len(text.strip()) < 250:
-        return False
-    if _INVOICE_RE.search(text[:_HEADER_CHARS]):
-        return True
-
-    norm = no_accent(text).upper()
-    signals = (
-        r"\bKY\s*HIEU\b",
-        r"\bNGAY\b.*\bTHANG\b.*\bNAM\b",
-        r"\bMA\s*SO\s*THUE\b|\bMST\b",
-        r"\bTEN\s*HANG\b|\bCONG\s*TIEN\b|\bTONG\s*TIEN\b",
-        r"\bMA\s*TRA\s*CUU\b|\bWEBSITE\s*TRA\s*CUU\b",
-        r"\bDON\s*VI\s*BAN\s*HANG\b|\bTEN\s*DON\s*VI\b",
-    )
-    return sum(1 for pat in signals if re.search(pat, norm, re.I)) >= 3
-
 
 def is_non_invoice_attachment_page(text: str) -> bool:
     norm = no_accent(text or "").upper()
@@ -158,71 +130,6 @@ def is_non_invoice_attachment_page(text: str) -> bool:
 
 # ── Các hàm extract dùng chung ───────────────────────────────────────────────
 
-def extract_ky_hieu(text: str) -> str:
-    for pat in (
-        r"K[yý]\s*hi[eệ]u\b\s*(?:\([^)]*\))?\s*[:\s]+([A-Z0-9]{4,20})",
-        r"Ky\s*hi[eé]u\b\s*:\s*([A-Z0-9]{4,20})",
-    ):
-        m = re.search(pat, text, re.I)
-        if m and not m.group(1).upper().startswith("M1"):
-            return m.group(1).strip()
-    m = re.search(r"\b(1[CK]\d{2}[A-Z]{2,4})\b", text)
-    if m:
-        return m.group(1)
-    lines = text.split("\n")
-    for i, line in enumerate(lines):
-        if re.search(r"K[yý]\s*hi[eé]", line) and ":" in line and i + 1 < len(lines):
-            m2 = re.search(r"\b([1-9][A-Z]\d{2}[A-Z]{2,4})\b", lines[i + 1])
-            if m2:
-                return m2.group(1)
-    return ""
-
-def extract_ngay(text: str) -> str:
-    m = re.search(r"\b(\d{2}/\d{2}/\d{4})\b", text)
-    if m:
-        return m.group(1)
-    for pat in (
-        r"Ng[aà]y\s*(?:\([^)]*\))?\s*(\d{1,2})\s*th[aá]ng\s*(?:\([^)]*\))?\s*(\d{1,2})\s*n[aă]m\s*(?:\([^)]*\))?\s*(\d{4})",
-        r"Ngay\s+(\d{1,2})\s+thang\s+(\d{1,2})\s+na[&\w]{0,3}m\s+(\d{4})",
-        r"Ng[aà]y\s+(\d{1,2})\s+th[aá]ng\s+(\d{1,2})\s+n[aă]m[^\n]*\n[^\n]*\b(\d{4})\b",
-    ):
-        m = re.search(pat, text, re.I)
-        if m:
-            return f"{m.group(1).zfill(2)}/{m.group(2).zfill(2)}/{m.group(3)}"
-    return ""
-
-def extract_bien_so(text: str) -> str:
-    label_pat = re.compile(
-        r"(?:Bi[eé]n\s*s[oéo6]\s*xe|Bien\s*so\s*xe"
-        r"|H[oọ]\s*(?:v[aà]\s*)?t[eê]n\s*ng[uư][oờ]i\s*mua(?:\s*h[aà]ng)?"
-        r"|T[eê]n\s*ng[uư][oờ]i\s*mua)(?:\s*\([^)]*\))?\s*[:\s]+([^\n\r]{2,30})",
-        re.I,
-    )
-    for src in (text, no_accent(text)):
-        m = label_pat.search(src)
-        if m:
-            lbl = no_accent(m.group(0)).lower()
-            cand = re.split(r"\s+(?:Ma|Dong|MST|\d{10})", m.group(1), flags=re.I)[0]
-            cand = re.sub(r"\s+[a-zA-Z'\"=_]{1,2}$", "", cand).strip()
-            if not cand:
-                continue
-            m2 = re.match(r"([0-9]{2}[A-Z0-9\-./  ]{3,15})", cand.upper())
-            if m2 and re.search(r"\d", m2.group(1)):
-                return m2.group(1).strip()
-            if "bien so" in lbl and 3 <= len(cand) <= 25:
-                if not re.search(r"(?:CONG TY|LIEN HIEP|MA SO|DIA CHI|HANG|THUE)", cand.upper()):
-                    return cand
-    m = re.search(
-        r"\b(\d{2}[A-Za-z]{1,2}[\s.\-–]*\d{3}[.\-\s]?\d{2,3}"
-        r"|\d{2}[A-Za-z]{1,2}[\s.\-–]*\d{4,6})\b", text, re.I,
-    )
-    if m:
-        return m.group(1)
-    
-    m2 = re.search(r"\b(\d{2})8([\s.\-–]*\d{3}[.\-\s]?\d{2,3})\b", text, re.I)
-    if m2:
-        return f"{m2.group(1)}B{m2.group(2)}"
-    return ""
 
 # ── Mã số thuế bên MUA hàng ──────────────────────────────────────────────────
 
@@ -287,232 +194,12 @@ def extract_mst_mua(text: str) -> str:
 
 # ── ĐỐI SOÁT CHỮ/SỐ THÔNG MINH ──────────────────────────────────────────────
 
-def _parse_vn_words(text: str) -> int:
-    """Đọc số tiền bằng chữ và khử nhiễu lỗi OCR (cross-check)."""
-    norm = no_accent(text).lower()
-    norm = re.sub(r'[^a-z\s:\n]', ' ', norm)
-    
-    words_str = ""
-    m = re.search(r"(?:bang\s*chu|viet\s*bang\s*chu|tien\s*bang\s*chu)\s*[:\s]*([a-z\s]+dong)", norm)
-    if m:
-        words_str = m.group(1)
-    else:
-        for line in norm.split("\n"):
-            if "dong" in line and ("trieu" in line or "nghin" in line or "ngan" in line):
-                words_str = line
-                break
-
-    if not words_str: 
-        return 0
-    
-    words_str = re.sub(r"\b(met|mat|mrt)\b", "mot", words_str)
-    words_str = re.sub(r"\b(hal)\b", "hai", words_str)
-    words_str = re.sub(r"\b(ban)\b", "bon", words_str)
-    words_str = re.sub(r"\b(nan|nhiem)\b", "nam", words_str)
-    words_str = re.sub(r"\b(san)\b", "sau", words_str)
-    words_str = re.sub(r"\b(hay)\b", "bay", words_str)
-    words_str = re.sub(r"\b(tan)\b", "tam", words_str)
-    words_str = re.sub(r"\b(chim)\b", "chin", words_str)
-    words_str = re.sub(r"\b(muol|muoi)\b", "muoi", words_str)
-    words_str = re.sub(r"\b(tran)\b", "tram", words_str)
-    words_str = re.sub(r"\b(nghi|ngan|nghin)\b", "nghin", words_str)
-    words_str = re.sub(r"\b(triau|trieu)\b", "trieu", words_str)
-
-    VAL = {"mot":1,"hai":2,"ba":3,"bon":4,"tu":4,"lam":5,"nam":5,
-           "sau":6,"bay":7,"tam":8,"chin":9,"muoi":10,"tram":100,
-           "nghin":1_000,"trieu":1_000_000,"ty":1_000_000_000}
-    BIG = {"ty","trieu","nghin"}
-    
-    tokens = words_str.split()
-    if "dong" in tokens:
-        tokens = tokens[:tokens.index("dong")]
-        
-    total = block = 0
-    for tok in tokens:
-        if tok in ("khong", "linh","le","va","chan"): continue
-        v = VAL.get(tok)
-        if v is None: continue
-        if tok in BIG:
-            total += (block or 1) * v; block = 0
-        elif tok == "tram":
-            block *= 100
-        elif tok == "muoi":
-            ones = block % 10
-            block = (block // 10) * 10 + (ones or 1) * 10
-        else:
-            block += v
-    total += block
-    return total
-
-def _find_tien(text: str, patterns: list[str]) -> str:
-    for pat in patterns:
-        for val in reversed(re.findall(pat, text, re.I)):
-            val = val.strip()
-            if num_ok(val):
-                return re.sub(r"(?<=\d)\s+(?=\d)", ".", val)
-    return ""
-
-def _plx_ocr_tien(text: str) -> str:
-    _NUM = r"(\d[\d.,\s]{2,}\d|\d{4,})"
-    result = _find_tien(text, [
-        r"C[oôộ]*ng\s*ti[eêéèếềểễệ][nmề]?\s*h[aàâă]*ng[^0-9]*" + _NUM,
-        r"T[oổ6]ng\s*(?:c[oôộ]*ng\s*)?ti[eêéèếềểễệ][nmề]?\s*thanh\s*to[aá]n[^0-9]*?" + _NUM,
-        r"Cong\s*tien\s*hang[^0-9]*" + _NUM,
-    ])
-    
-    extracted_str = ""
-    if result: 
-        extracted_str = re.sub(r"\s+", ".", result.strip()) 
-    else:
-        for prod in re.finditer(r"[\[\|(]\s*\d\s*[\]|)][^\n]+", text, re.I):
-            nums = [n for n in re.findall(r"\d{1,3}(?:\.\d{3})+", prod.group()) if num_ok(n)]
-            if nums: 
-                extracted_str = nums[-1]
-                break
-        if not extracted_str:
-            for line in text.split("\n"):
-                if re.search(r"c[oôộ]*ng\s*ti[eêéèếềểễệ][nề]", line, re.I):
-                    nums = re.findall(r"\d{1,3}(?:[.\s]\d{3})+", line)
-                    for n in reversed(nums):
-                        if num_ok(n): 
-                            extracted_str = re.sub(r"\s+", ".", n.strip())
-                            break
-                    if extracted_str: break
-
-    # Logic đối soát: NẾU SỐ VÀ CHỮ KHÁC NHAU -> LUÔN TIN TƯỞNG CHỮ
-    word_val = _parse_vn_words(text)
-    
-    if extracted_str:
-        try:
-            num_val = int(extracted_str.replace(".", "").replace(" ", "").replace(",", ""))
-        except ValueError:
-            num_val = 0
-            
-        # Ưu tiên lấy theo chữ nếu đọc được và có sự sai lệch
-        if word_val > 0 and num_val != word_val:
-            return str(word_val)
-                
-        return extracted_str
-        
-    # Nếu máy không tìm thấy số nào cả nhưng đọc được chữ -> Trả về chữ
-    if word_val > 0:
-        return str(word_val)
-        
-    return ""
-
-def _std_txt_tien(text: str) -> str:
-    result = _find_tien(text, [
-        r"Tổng\s*(?:cộng\s*)?tiền\s*thanh\s*toán\s*(?:\([^)]*\))?[^0-9]*([\d.,]+)",
-        r"C[oôộ]*ng\s*ti[eêéèếềểễệ][nmề]?\s*h[aàâă]*ng*(?:\([^)]*\))?[^0-9]*([\d.,]+)",
-        r"Tổng\s*tiền\s*hàng[^0-9]*([\d.,]+)",
-        r"T[oổ]ng\s*ti[eề]n\s*thanh\s*to[aá]n\s*b[aằ]ng\s*s[oố]\s+([\d.,]+)",
-        r"Cong\s*tien\s*hang[^0-9]*([\d.,]+)",
-    ])
-    if result: return result
-    norm = no_accent(text)
-    return _find_tien(norm, [
-        r"Tong\s*tien\s*hang[^0-9]*([\d.,]+)",
-        r"Tong\s*(?:cong\s*)?tien\s*thanh\s*toan\s*(?:bang\s*so\s*)?([\d.,]+)",
-        r"Cong\s*tien\s*hang[^0-9]*([\d.,]+)",
-    ])
 
 # ── Item helpers ─────────────────────────────────────────────────────────────
 
 _STRIP_STT = re.compile(r"^[\[\|(]{0,2}\s*[LlEe|]?[\[\|(]{0,2}\s*\d+\s*[\]|)\s\[|]+")
 _DVT_RE    = re.compile(r"\s+(?:L[ií]t|KG|kg|Lit|lit|th[uù]ng|chai|can)\s*$", re.I)
 
-def _strip_stt(line: str) -> str:
-    lc = _STRIP_STT.sub("", clean(line)).strip()
-    return re.sub(r"^\d+\s+", "", lc).strip()
-
-def _item_before_number(line: str) -> str:
-    name = []
-    for p in line.split():
-        raw = re.sub(r"[,.()\[\]|]", "", p)
-        if raw.isdigit() and int(raw) > 1000: break
-        if re.match(r"^\|[A-Z0-9]+$", p): break
-        name.append(p)
-    result = re.sub(r"\s+[=|*()\[\]]{1,2}$", "", " ".join(name)).strip()
-    return result if len(result) > 3 else ""
-
-def _clean_item_tail(name: str) -> str:
-    name = re.sub(r"\s*__+\s*.*$", "", name).strip()
-    name = re.sub(r"\s*[|]\s*[LlĐđlLữíìúùi]{1,3}[\s|.]*$", "", name).strip()
-    name = re.sub(r"\s+[_|.LlĐđ\s]{1,10}$", "", name).strip()
-    return re.sub(r"[\s|._\-=]+$", "", name).strip()
-
-def _normalize_item(name: str) -> str:
-    name = re.sub(r"^(?:[A-Za-z]{1,5}\s+)+(?=(?:Xang|Dau|RON|Gas)\b)", "", name, flags=re.I)
-    name = re.sub(r"\bX[&àâéèêa-z]{1,3}n[ag]\b|\bXd[on]?ng\b", "Xang", name, flags=re.I)
-    name = re.sub(r"\b[DÐ][&àáâăắặạaấầẩẫậ4][uúùưứựụ]\b", "Dau", name, flags=re.I)
-    name = re.sub(r"\b(?:Mi[rc]+|Mtrc|Mire|M[ao]es|Moes|ME(?=\s*\d))\b", "Muc", name, flags=re.I)
-    name = re.sub(r"\bDi[eéèêẹếềểễệ]z[ae]n\b|\b[ÐĐ]i[eéèêẹếềểễệ]z[ae]n\b", "Diezen", name, flags=re.I)
-    name = re.sub(r"\bMuc\s+Muc\b", "Muc", name, flags=re.I)
-    name = re.sub(r"0,0018", "0,001S", name)
-    if re.match(r"^RON\b", name, re.I):
-        name = "Xang " + name
-    return re.sub(r"(\s+[a-zA-Z]{1,2})+$", "", name).strip()
-
-def _item_from_text(text: str) -> str:
-    HDRS = ("tên hàng hóa","ten hang hoa","name of goods","goods, services","goods and services")
-    ITEM_START = re.compile(
-        r"^(?:X[a-z&àâáéèêa]{1,3}n[ag]"
-        r"|[DÐĐ][aàáâãăắặạ&4ầấẩẫậ][uúùưứựụ]\s+[DÐĐd]"
-        r"|D[a-z&àâ4áấ][uú]\s+[DĐd]|Gas|Nhien\s*lieu)", re.I,
-    )
-    KW_DIESEL  = re.compile(r"D[iíìîïị][eéèêẹếềểễệ][sz][ae][lnz]|[Dd]i[eé]sel|D[iíìîïị]ezel", re.I)
-    KW_XANG    = re.compile(r"RON\s*9[0-9]|X[aà][ng]g?\s*RON|Xang\s*RON", re.I)
-    KW_NORM    = re.compile(r"dau\s+die[sz]|dau\s+d[iy][ae]|xang\s+ron|xang\s+r[o0]n", re.I)
-    PRODUCT_RE = re.compile(
-        r"(?:X[aàâ&][ng]g?|Xang)\s+(?:RON|E10|E\s*10)[^\n]{0,30}"
-        r"|(?:[DÐĐ][aàáâầấ&4][uúùư]|Dau)\s+(?:[DÐĐ][ií][eéèê]|Die)[^\n]{0,30}"
-        r"|RON\s*9[0-9][^\n]{0,20}", re.I,
-    )
-
-    def _try_line(lc: str) -> str:
-        name = _item_before_number(lc)
-        name = _DVT_RE.sub("", name).strip()
-        name = re.sub(r"[|>]+$", "", name).strip()
-        name = _clean_item_tail(name)
-        return name if len(name) > 3 else ""
-
-    lines = text.split("\n")
-    found = False
-    for line in lines:
-        lc = clean(line)
-        if found:
-            if re.fullmatch(r"[\d\s()==xX×.,|]+", lc): continue
-            lc_stripped = _strip_stt(lc)
-            name = _item_before_number(lc_stripped)
-            name = _DVT_RE.sub("", name).strip()
-            if name and is_valid_item(name): return _normalize_item(name)
-            if is_valid_item(lc_stripped): return _normalize_item(_item_before_number(lc_stripped) or lc_stripped)
-            found = False
-        if any(h in line.lower() for h in HDRS):
-            found = True
-
-    for line in lines:
-        lc = _strip_stt(line)
-        if ITEM_START.match(lc) or KW_DIESEL.search(lc) or KW_XANG.search(lc):
-            name = _normalize_item(_try_line(lc))
-            if name: return name
-
-    norm = no_accent(text)
-    for line in norm.split("\n"):
-        lc = _strip_stt(line)
-        if KW_NORM.search(lc):
-            name = _try_line(lc)
-            if name:
-                return re.sub(r"\b(xang|dau|die[sz]en|muc|mi[rc]+)\b",
-                              lambda mo: {"xang":"Xang","dau":"Dau","muc":"Muc"}.get(mo.group().lower(), "Diezen"),
-                              name, flags=re.I)
-
-    for src in (text, norm):
-        m = PRODUCT_RE.search(src)
-        if m:
-            name = _normalize_item(_try_line(m.group()))
-            if name: return name
-    return ""
 
 _NO_TABLE_HIT = object()
 
@@ -585,30 +272,6 @@ def _scan_tables_for_item(pdf):
 
 # ── Extractor theo loại ──────────────────────────────────────────────────────
 
-def _plx_txt_so(text: str) -> str:
-    for pat in (r"\bSố\s*(?:\([^)]*\))?\s*:\s*(\d{3,})", r"\bS[oéố6]\s*(?:\([^)]*\))?\s*[:\s]\s*(\d{4,})"):
-        m = re.search(pat, text, re.I)
-        if m: return m.group(1).lstrip("0") or m.group(1)
-    return ""
-
-def _plx_txt_don_vi(text: str) -> str:
-    for pat in (
-        r"[ĐD][oơ]n\s*v[iị]\s*mua\s*h[aà]ng\s*[:\s]+([^\n]+)",
-        r"Tên\s*(?:đơn\s*vị|người)\s*mua(?:\s*hàng)?\s*(?:\([^)]*\))?\s*[:\s]+([^\n]+)",
-        r"(?:Buyer['\s]*name|Company['\s]*name)\s*[:\)]\s*([^\n]+)",
-    ):
-        m = re.search(pat, text, re.I)
-        if m:
-            val = strip_prefix(cut_at_mst(clean(m.group(1))))
-            val = re.sub(r"\s+[g=_'\"|\s]{1,2}$", "", val).strip()
-            if len(val) > 5 and not is_bien_so(val): return val
-    return ""
-
-def _plx_txt_tien(text: str) -> str:
-    return _find_tien(text, [
-        r"C[oôộ]*ng\s*ti[eêéèếềểễệ][nmề]?\s*h[aàâă]*ng[^0-9]*([\d.,]+)",
-        r"T[oổ6]ng\s*(?:c[oôộ]*ng\s*)?ti[eêéèếềểễệ][nmề]?\s*thanh\s*to[aá]n[^0-9]*?([\d.,]+)",
-    ])
 
 def _plx_ocr_so(text: str, file_name: str) -> str:
     found = _invoice_no_from_text(text)
@@ -646,49 +309,6 @@ def _plx_ocr_don_vi(text: str) -> str:
     m = re.search(r"(HOP\s+TAC\s+XA[^\n]{0,80})", text, re.I)
     return cut_at_mst(clean(m.group(1))) if m else ""
 
-def _std_txt_so(text: str) -> str:
-    for pat in (
-        r"\bSố\s*(?:\([^)]*\))?\s*:\s*(\d{3,})",
-        r"\bS[oéố6]\s*(?:\([^)]*\))?\s*[:\s]\s*(\d{4,})",
-        r"\bSố\s*:\s*\n\s*(\d{3,})",
-    ):
-        m = re.search(pat, text, re.I)
-        if m: return m.group(1).lstrip("0") or m.group(1)
-    m = re.search(r"(\d{4,})\s*\n\s*S[oốéố6]\s*:", text, re.I)
-    if m: return m.group(1).lstrip("0") or m.group(1)
-    return ""
-
-def _std_txt_don_vi(text: str) -> str:
-    _BSX_RE = re.compile(r"bien\s*so\s*xe\s*[:\s]", re.I)
-    def has_bsx(val: str) -> bool: return bool(_BSX_RE.search(no_accent(val)))
-
-    mb = re.search(r"[ĐD][oơ]n\s*v[iị]\s*b[aá]n\s*h[aà]ng", text, re.I)
-    search_text = text[mb.end():] if mb else text
-
-    for pat in (
-        r"Tên\s*đơn\s*vị\s*mua\s*hàng\s*(?:\([^)]*\))?\s*[:\s]+([^\n]+)",
-        r"[ĐD][oơ]n\s*v[iị]\s*mua\s*h[aà]ng\s*[:\s]+([^\n]+)",
-        r"Tên\s*đơn\s*vị\s*(?:\([^)]*\))?\s*[:\s]+([^\n]+)",
-        r"Tên\s*người\s*mua\s*(?:hàng)?\s*(?:\([^)]*\))?\s*[:\s]+([^\n]+)",
-        r"Ten\s*nguoi\s*mua\s*(?:hang\s*)?[:\s]+([^\n]+)",
-        r"(?:Buyer['\s]*name|Company['\s]*name)\s*[:\)]\s*([^\n]+)",
-    ):
-        for m in re.finditer(pat, search_text, re.I):
-            val = strip_prefix(cut_at_mst(clean(m.group(1))))
-            val = re.sub(r"\s+[g=_'\"|\s]{1,2}$", "", val).strip()
-            if has_bsx(val) or is_bien_so(val) or len(val) <= 5: continue
-            return val
-
-    norm = no_accent(search_text)
-    for pat in (
-        r"Ten\s*don\s*vi\s*(?:mua\s*hang\s*)?[:\s]+([^\n]+)",
-        r"Ten\s*nguoi\s*mua\s*(?:hang\s*)?[:\s]+([^\n]+)",
-    ):
-        for m in re.finditer(pat, norm, re.I):
-            val = strip_prefix(cut_at_mst(clean(m.group(1))))
-            if has_bsx(val) or is_bien_so(val) or len(val) <= 5: continue
-            return val
-    return ""
 
 # ── Điều phối extract ────────────────────────────────────────────────────────
 
@@ -734,7 +354,7 @@ def _extract_from_text(text: str, issuer: str, loai_pdf: str,
 
 # ── Xử lý 1 file PDF ────────────────────────────────────────────────────────
 
-def extract_data(pdf_path: str) -> list[dict]:
+def _extract_data_base(pdf_path: str) -> list[dict]:
     file_name = os.path.basename(pdf_path)
     base_name = os.path.splitext(file_name)[0]
     blank = {k: "" for k in COLUMNS}
@@ -746,8 +366,8 @@ def extract_data(pdf_path: str) -> list[dict]:
             if n == 0:
                 blank["Nguon"] = "empty"; return [blank]
 
-            # [v26-A4] Trích text đúng 1 lần cho mọi trang (trước đây detect_pdf + extract_data
-            # gọi extract_text 2 lượt). Kết quả all_text/issuer/loai_pdf giống hệt detect_pdf cũ.
+            # [v26-A4] Trích text đúng 1 lần cho mọi trang (trước đây phải
+            # gọi extract_text 2 lượt).
             pages_text = [p.extract_text() or "" for p in pdf.pages]
             all_text = "\n".join(pages_text)
             if all_text.strip():
@@ -845,30 +465,6 @@ def extract_data(pdf_path: str) -> list[dict]:
 
 # ── DATA CLEANING (LÀM SẠCH DỮ LIỆU) ─────────────────────────────────────────
 
-def clean_bien_so(bs: str) -> str:
-    if pd.isna(bs) or not isinstance(bs, str) or not str(bs).strip():
-        return "Không biển số"
-    bs = no_accent(str(bs)).upper()
-    bs = bs.replace("'", "").replace("\n", " ").strip()
-    bs = re.sub(r"^BIEN\s*SO\s*XE\s*[:：-]*\s*", "", bs, flags=re.I)
-    bs = re.sub(r"\s+", "", bs)
-    bs = bs.replace("–", "-").replace("—", "-")
-    if bs in {"-->", "-", ""}:
-        return "Không biển số"
-
-    m = re.match(r"^(\d{2}[A-Z]{1,2})[-.]?(\d{3})(\d{2})$", bs)
-    if m:
-        return f"{m.group(1)}-{m.group(2)}.{m.group(3)}"
-
-    m = re.match(r"^(\d{2}[A-Z]{1,2})[-.]?(\d{3})[.-]?(\d{2})$", bs)
-    if m:
-        return f"{m.group(1)}-{m.group(2)}.{m.group(3)}"
-
-    m = re.match(r"^(\d{2}[A-Z]{1,2})[-.]?(\d{3})(\d{2})[A-Z]$", bs)
-    if m:
-        return f"{m.group(1)}-{m.group(2)}.{m.group(3)}"
-
-    return bs
 
 def clean_hang_hoa(hh: str) -> str:
     if pd.isna(hh) or not isinstance(hh, str) or not str(hh).strip():
@@ -884,7 +480,7 @@ def clean_hang_hoa(hh: str) -> str:
         return "Dầu"
     return "Cần kiểm tra"
 
-def finalize_clean_row(row: pd.Series) -> pd.Series:
+def _finalize_clean_row_base(row: pd.Series) -> pd.Series:
     ten_file = str(row.get("Ten file", "")).strip()
 
     if row.get("Tên hàng hóa, dịch vụ") == "Cần kiểm tra":
@@ -1005,15 +601,6 @@ def _error_row(path: str, alias: str = "") -> dict:
     return row
 
 
-def _ocr_digits(val: str) -> str:
-    return val.translate(str.maketrans({"O": "0", "o": "0", "W": "4", "w": "4", "I": "1", "l": "1"}))
-
-
-def _first_money(val: str) -> str:
-    nums = re.findall(r"\d{1,3}(?:[.,]\d{3})+|\d{4,}", val)
-    return nums[-1] if nums else ""
-
-
 def extract_ky_hieu(text: str) -> str:
     norm = no_accent(text).upper().replace("£", "K").replace("€", "C")
     for pat in (
@@ -1047,91 +634,6 @@ def extract_ky_hieu(text: str) -> str:
                 return "1K26TAN"
             return val
     return ""
-
-
-def extract_ngay(text: str) -> str:
-    norm = no_accent(text)
-    norm = _ocr_digits(norm)
-    norm = re.sub(r"\bA?Ngay\b", "Ngay", norm, flags=re.I)
-    norm = re.sub(r"\bthang\b", "thang", norm, flags=re.I)
-    norm = re.sub(r"\bn[i1]m\b", "nam", norm, flags=re.I)
-
-    m = re.search(r"\b(\d{2}/\d{2}/\d{4})\b", norm)
-    if m:
-        return m.group(1)
-
-    m = re.search(
-        r"Ngay(?:\s*\([^)]*\))?\s*(\d{1,2})\s*thang(?:\s*\([^)]*\))?\s*(\d{1,2})\s*nam(?:\s*\([^)]*\))?\s*(\d{4})",
-        norm,
-        re.I,
-    )
-    if m:
-        return f"{m.group(1).zfill(2)}/{m.group(2).zfill(2)}/{m.group(3)}"
-    return ""
-
-
-def _plx_txt_so(text: str) -> str:
-    norm = no_accent(text)
-    candidates = []
-    for line in norm.splitlines():
-        if re.search(r"ma\s+s[o0eé6]|s[o0eé6]\s+thue|tax|mst|bien\s*s[o0eé6]|cua\s+hang\s+s[o0eé6]|ma\s+qhns", line, re.I):
-            continue
-        if not re.search(r"\bS[o0eé6]?\b[^\d\n]{0,20}\d|s[áaàeéè]\s*[:.;/]", line, re.I):
-            continue
-        for pat in (
-            r"\bS[o0eé6]?\b\s*(?:\([^)]*\))?\s*[:.;/]?\s*[^\d\n]{0,12}(\d{4,})",
-            r"\bS\b\s*[:.;/]?\s*[^\d\n]{0,12}(\d{4,})",
-            r"s[áaàeéè]\s*[:.;/]?\s*[^\d\n]{0,12}(\d{4,})",
-        ):
-            m = re.search(pat, line, re.I)
-            if m:
-                raw = m.group(1)
-                if 4 <= len(raw) <= 8:
-                    candidates.append((len(raw), raw))
-    if not candidates:
-        return ""
-    raw = sorted(candidates, reverse=True)[0][1]
-    return raw.lstrip("0") or raw
-
-
-def _std_txt_so(text: str) -> str:
-    return _plx_txt_so(text)
-
-
-def _plx_txt_don_vi(text: str) -> str:
-    norm = no_accent(text)
-    matches = re.findall(
-        r"(?:Ten\s+(?:nguoi\s+mua|don\s+vi)[^:\n)]*|Don\s*vi\s*mua\s*hang|Company'?s\s+\w+)\s*[:)]\s*([^\n]+)",
-        norm,
-        re.I,
-    )
-    for val in matches:
-        val = strip_prefix(cut_at_mst(clean(val)))
-        if re.search(r"\b(LIEN\s+HIEP|HOP\s+TAC\s+XA)\b", val, re.I):
-            return val
-    for val in matches:
-        val = strip_prefix(cut_at_mst(clean(val)))
-        if len(val) > 5 and not is_bien_so(val) and "CONG TY TNHH" not in val.upper():
-            return val
-    return ""
-
-
-def _plx_txt_tien(text: str) -> str:
-    norm = no_accent(text)
-    for line in norm.splitlines():
-        if re.search(r"\b(Cong\s+tien\s+hang|Tong\s+tien\s+thanh\s+toan)\b|^\s*Cong\b", line, re.I):
-            money = _first_money(line)
-            if money and num_ok(money):
-                return money
-
-    for line in norm.splitlines():
-        if re.search(r"\b(RON|Diezen|Diesel)\b", line, re.I):
-            money = _first_money(line)
-            if money and num_ok(money):
-                return money
-
-    word_val = _parse_vn_words(text)
-    return str(word_val) if word_val > 0 else ""
 
 
 def _item_from_text(text: str) -> str:
@@ -1682,13 +1184,35 @@ def _needs_better_value(column: str, value) -> bool:
     return False
 
 
-def _source_image_folder(base_name: str) -> str:
-    candidates = []
+def _tool_convert_input_dir() -> str:
+    """Thư mục input của Tool_Convert (ảnh gốc trước khi ghép PDF), không ghi cứng đường dẫn máy nào:
+      1. biến môi trường TOOL_CONVERT_INPUT
+      2. app_config.json cạnh v25.py: "tools": {"root": ..., "convert_all": "Tool_Convert/main.py"}
+         -> <root>/Tool_Convert/input  (hoặc khai báo thẳng "convert_input": "D:\\...\\input")"""
     env_root = os.environ.get("TOOL_CONVERT_INPUT")
     if env_root:
-        candidates.append(os.path.join(env_root, base_name))
+        return env_root
+    try:
+        import json
+        cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app_config.json")
+        with open(cfg_path, encoding="utf-8") as f:
+            tools = (json.load(f) or {}).get("tools") or {}
+        root = os.path.join(os.path.dirname(cfg_path), str(tools.get("root") or ""))
+        if tools.get("convert_input"):
+            return os.path.join(root, str(tools["convert_input"]))
+        if tools.get("convert_all"):
+            return os.path.join(root, os.path.dirname(str(tools["convert_all"])), "input")
+    except Exception:
+        pass
+    return ""
+
+
+def _source_image_folder(base_name: str) -> str:
+    candidates = []
+    input_dir = _tool_convert_input_dir()
+    if input_dir:
+        candidates.append(os.path.join(input_dir, base_name))
     candidates.extend([
-        os.path.join(r"C:\Users\MSI\OneDrive\Desktop\project\Tool_Convert\input", base_name),
         os.path.join(os.path.dirname(__file__), "Import", base_name),
         os.path.join(os.path.dirname(__file__), base_name),
     ])
@@ -2102,7 +1626,7 @@ def _improve_rows_from_pdf_render(pdf_path: str, rows: list[dict], fields: list[
 def _same_plate_number_different_ef(current: str, verified: str) -> bool:
     cur = clean_bien_so(str(current or ""))
     new = clean_bien_so(str(verified or ""))
-    if cur == new or cur == "KhÃ´ng biá»ƒn sá»‘" or new == "KhÃ´ng biá»ƒn sá»‘":
+    if cur == new or cur == "Không biển số" or new == "Không biển số":
         return False
     cur_raw = re.sub(r"[^0-9A-Z]", "", no_accent(cur).upper())
     new_raw = re.sub(r"[^0-9A-Z]", "", no_accent(new).upper())
@@ -2136,11 +1660,7 @@ def _verify_ef_plate_from_pdf_render(pdf_path: str, rows: list[dict]) -> list[di
     if not OCR_AVAILABLE or not rows:
         return rows
     for row in rows:
-        plate_key = "Biá»ƒn sá»‘ xe"
-        for key in ("Biển số xe", "Biá»ƒn sá»‘ xe"):
-            if key in row:
-                plate_key = key
-                break
+        plate_key = "Biển số xe"
         current_plate = str(row.get(plate_key, "")).strip()
         if not re.search(r"\d{2}E[-.\s]?\d", no_accent(current_plate).upper()):
             continue
@@ -2157,13 +1677,6 @@ def _verify_ef_plate_from_pdf_render(pdf_path: str, rows: list[dict]) -> list[di
     return rows
 
 
-def _row_key(row: dict, *names: str) -> str:
-    for name in names:
-        if name in row:
-            return name
-    return names[0]
-
-
 def _amount_int_from_value(value) -> int:
     digits = re.sub(r"\D", "", str(value or ""))
     if not digits:
@@ -2178,7 +1691,7 @@ def _verify_amount_words_from_pdf_render(pdf_path: str, rows: list[dict]) -> lis
     if not OCR_AVAILABLE or not rows:
         return rows
     for row in rows:
-        amount_key = _row_key(row, "Cộng tiền hàng", "Cá»™ng tiá»n hÃ ng")
+        amount_key = "Cộng tiền hàng"
         current_amount = _amount_int_from_value(row.get(amount_key))
         if not (7_000_000 <= current_amount <= 7_999_999):
             continue
@@ -2198,9 +1711,6 @@ def _verify_amount_words_from_pdf_render(pdf_path: str, rows: list[dict]) -> lis
             source = str(row.get("Nguon", "")).strip()
             row["Nguon"] = f"{source}+amount_words_verified" if source else "amount_words_verified"
     return rows
-
-
-_finalize_clean_row_base = finalize_clean_row
 
 
 def finalize_clean_row(row: pd.Series) -> pd.Series:
@@ -2224,9 +1734,6 @@ def finalize_clean_row(row: pd.Series) -> pd.Series:
     elif hang_hoa == "Cần kiểm tra" and ky_hieu == "1K26TAN" and bien_so == "49H-040.14":
         row["Tên hàng hóa, dịch vụ"] = "Xăng"
     return row
-
-
-_extract_data_base = extract_data
 
 
 def extract_data(pdf_path: str) -> list[dict]:
