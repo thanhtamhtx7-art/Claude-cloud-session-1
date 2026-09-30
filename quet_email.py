@@ -14,6 +14,11 @@ import threading
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
+# Gmail giới hạn tốc độ gọi API (lỗi 429 / 403 rateLimitExceeded) và thỉnh thoảng lỗi 5xx / rớt mạng.
+# execute(num_retries=...) tự thử lại các lỗi này, chờ tăng dần (1s, 2s, 4s...) giữa các lần.
+GMAIL_RETRIES = 5
+SCAN_WORKERS = 8          # số luồng đọc email song song (15 luồng trước đây dễ vượt giới hạn tốc độ)
+
 # Fix #1: Vẫn giữ thread_local nhưng cache theo token để tránh stale credentials
 thread_local = threading.local()
 
@@ -67,9 +72,25 @@ def normalize_domain(domain):
     return domain
 
 
+# Dấu hiệu tên miền của các nhà cung cấp hóa đơn mà main.py tải được (giống thứ tự kiểm tra trong main.py)
+SUPPORTED_SUPPLIER_HINTS = ("easyinvoice", "meinvoice.vn", "pvoil", "smartsign.com.vn", "fast",
+                            "ehoadon.vn", "vnpt-invoice.com.vn", "vnpt")
+
+
+def is_supported_supplier(domain):
+    d = (domain or "").lower()
+    return any(h in d for h in SUPPORTED_SUPPLIER_HINTS)
+
+
 def extract_supplier(text):
+    """Tên miền nhà cung cấp hóa đơn trong nội dung email.
+    Ưu tiên tên miền của nhà cung cấp đã hỗ trợ (EasyInvoice, VNPT...) dù nó không đứng đầu:
+    email hay có website của bên bán đứng trước link hóa đơn. Không có -> tên miền .vn đầu tiên như cũ."""
     domains = re.findall(r"[a-zA-Z0-9.-]+\.(?:com\.vn|vn)", text)
     normalized = [normalize_domain(d) for d in domains]
+    for d in normalized:
+        if is_supported_supplier(d):
+            return d
     return normalized[0] if normalized else None
 
 
@@ -120,7 +141,7 @@ def get_message_content_and_pdf(service, msg_id):
     """Trả về (nội dung text, có PDF đính kèm không, meta={subject, mail_date, sender, attachments})."""
     msg = service.users().messages().get(
         userId="me", id=msg_id, format="full"
-    ).execute()
+    ).execute(num_retries=GMAIL_RETRIES)
 
     text = ""
     has_pdf = False
@@ -170,7 +191,7 @@ def get_message_content_and_pdf(service, msg_id):
 
 
 def get_label_id(service, label_name):
-    results = service.users().labels().list(userId="me").execute()
+    results = service.users().labels().list(userId="me").execute(num_retries=GMAIL_RETRIES)
     labels = results.get("labels", [])
     for label in labels:
         if label["name"].lower() == label_name.lower():
@@ -193,7 +214,7 @@ def list_all_messages(service, label_id=None, query=None):
             kwargs["labelIds"] = [label_id]
         if query:
             kwargs["q"] = query
-        results = service.users().messages().list(**kwargs).execute()
+        results = service.users().messages().list(**kwargs).execute(num_retries=GMAIL_RETRIES)
         messages.extend(results.get("messages", []))
 
         page_token = results.get("nextPageToken")
@@ -255,7 +276,7 @@ def _scan_ids(creds, ids, include_content, keywords=None):
         return ok, errors
 
     done = 0
-    with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=SCAN_WORKERS) as executor:
         futures = {
             executor.submit(_process_message, creds, mid, include_content, keywords): mid
             for mid in ids
@@ -333,6 +354,7 @@ def run_scan(label_name="xd", token_path="token.json", credentials_path="credent
     if query is None:
         label_id = get_label_id(service, label_name)
         if not label_id:
+            print(f"[WARN] Không tìm thấy label Gmail '{label_name}' -> không có email nào để quét.")
             return {"total": 0, "listed": 0, "skipped_known": 0, "pdf": 0,
                     "suppliers": Counter(), "data": [], "read_errors": []}
         messages = list_all_messages(service, label_id=label_id, query=extra_query)

@@ -485,6 +485,8 @@ async def main():
     # ---- Petrolimex: tải lại bằng đúng bước tải PDF Petro của main.py (tự giải CAPTCHA, chạy ẩn) ----
     if petro_items:
         P(f"\n[RETRY] Petrolimex: tải lại {len(petro_items)} hóa đơn bằng bước tải PDF Petro của main.py")
+        if hasattr(state, "petro_reset_not_found"):      # bạn chủ động chọn tải lại -> tra cứu lại cả mã từng báo không tồn tại
+            state.petro_reset_not_found([it["id"] for it in petro_items])
         before = {r.get("message_id") for r in state.petro_pending_downloads()}
         ids = [it["id"] for it in petro_items if it["id"] in before]
         for it in petro_items:
@@ -758,9 +760,11 @@ def profile_status(p):
                     st["petro"] = {r[0]: r[1] for r in conn.execute(
                         "SELECT COALESCE(pdf_status,'PENDING'), COUNT(*) FROM petro_invoices GROUP BY 1")}
                     if "ma_tra_cuu" in pcols:      # hóa đơn có mã tra cứu, chưa tải được PDF (giống nút "Tải PDF còn thiếu")
+                        # bỏ mã đã bị báo "không tồn tại hóa đơn" đủ số lần (main.py thôi tự thử lại, xem email_state.py)
+                        nf = " AND COALESCE(pdf_not_found,0) < 3" if "pdf_not_found" in pcols else ""
                         st["petro_todo"] = conn.execute(
                             "SELECT COUNT(*) FROM petro_invoices WHERE COALESCE(ma_tra_cuu,'') <> '' "
-                            "AND UPPER(COALESCE(pdf_status,'PENDING')) IN ('PENDING','FAILED')").fetchone()[0]
+                            "AND UPPER(COALESCE(pdf_status,'PENDING')) IN ('PENDING','FAILED')" + nf).fetchone()[0]
             finally:
                 conn.close()
         except Exception as e:
@@ -1228,7 +1232,7 @@ def build_commands(pid, action, o):
         o["_tmp"] = [tmp]
         o["_count"] = len(clean)
         margs = ["--profile", pid]
-        if paths["ui"].get("download_dir") and not paths["config"]:
+        if paths["ui"].get("download_dir"):          # giống profile_paths(): thư mục đặt ở giao diện được ưu tiên
             margs += ["--download-dir", str(paths["ui"]["download_dir"])]
         feats = main_features()
         if o.get("keep_xml") and feats["keep_xml"]:
@@ -1258,7 +1262,9 @@ def build_commands(pid, action, o):
         return "Quét hóa đơn → Excel (v25)", [["Quét bằng v25", [str(v25), str(folder), str(out), bool(o.get("skip_petro")), workers, o.get("fix_mst", True) is not False], False, "v25"]]
     base = ["--profile", pid]
     paths = profile_paths(pid)
-    if paths["ui"].get("download_dir") and not paths["config"]:
+    # Thư mục tải đặt ở giao diện được ưu tiên (kể cả profile có trong app_config.json), giống profile_paths().
+    # Trước đây chỉ truyền cho profile ngoài app_config.json nên app.py và main.py nhìn 2 thư mục khác nhau.
+    if paths["ui"].get("download_dir"):
         base += ["--download-dir", str(paths["ui"]["download_dir"])]
 
     feats = main_features()
@@ -2021,8 +2027,11 @@ def build_tong_hop(pid, log):
             log("[XML-HD] Không đọc được %s: %r (bỏ qua khi tổng hợp)" % (src, e), "err")
             continue
         for row in rows:
-            if group.startswith("Không có XML") and row.get("Ten file") and str(row["Ten file"]) not in kh_stems:
-                continue                                   # PDF này đã có XML và chuyển sang Cac_hang_khac
+            # PDF này đã có XML và chuyển sang Cac_hang_khac. Bỏ đuôi _p2, _p3... (PDF chứa nhiều hóa đơn)
+            # trước khi so, nếu không các dòng đó luôn bị loại khỏi Tổng hợp.
+            if group.startswith("Không có XML") and row.get("Ten file") and \
+                    re.sub(r"_p\d+$", "", str(row["Ten file"])) not in kh_stems:
+                continue
             if seen.find(row):
                 continue                                   # trùng Tên đơn vị + Ký hiệu + Số với dòng đã lấy
             seen.add(row, True)

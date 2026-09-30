@@ -23,6 +23,14 @@ ALL_STATUSES = (DONE, FAILED, SKIPPED, PENDING)
 
 GMAIL_LINK = "https://mail.google.com/mail/u/0/#all/{}"
 
+# Email chỉ bị lỗi ĐỌC (mạng / vượt giới hạn tốc độ Gmail) thì chưa hề được xử lý -> cho thử lại nhiều lần hơn
+READ_ERROR_PREFIX = "SCAN_READ_ERROR"
+READ_ERROR_MAX_ATTEMPTS = 10
+
+# Petro: trang tra cứu báo "không tồn tại hóa đơn" bấy nhiêu lần (ở các lần chạy khác nhau) thì thôi tự thử lại.
+# Cho vài lần vì hóa đơn mới xuất đôi khi chưa tra cứu được ngay. Muốn thử lại: "Đánh dấu xử lý lại" email đó.
+PETRO_NOT_FOUND_MAX = 3
+
 CSV_COLUMNS = [
     "updated_at", "status", "supplier", "mail_date", "subject", "reason",
     "attempts", "saved_count", "files", "gmail_link", "message_id",
@@ -118,6 +126,7 @@ class EmailState:
                 ("dup_of", "TEXT"),                        # trùng với email nào / 'MASTER' (file tổng)
                 ("master_synced", "INTEGER DEFAULT 0"),    # đã ghi vào file tổng chưa
                 ("force_pdf", "INTEGER DEFAULT 0"),        # người dùng chủ động yêu cầu tải lại -> bỏ qua lọc trùng
+                ("pdf_not_found", "INTEGER DEFAULT 0"),    # số lần trang tra cứu báo "không tồn tại hóa đơn"
             ):
                 if name not in cols:
                     self.conn.execute(f"ALTER TABLE petro_invoices ADD COLUMN {name} {ddl}")
@@ -203,7 +212,7 @@ class EmailState:
                 # Xử lý lại email Petro -> đồng thời cho phép tải lại PDF của nó
                 self.conn.execute(
                     "UPDATE petro_invoices SET pdf_status='PENDING', pdf_file=NULL, pdf_error=NULL, "
-                    "dup_of=NULL, master_synced=0, force_pdf=1 WHERE message_id=?",
+                    "dup_of=NULL, master_synced=0, force_pdf=1, pdf_not_found=0 WHERE message_id=?",
                     (message_id,),
                 )
             self.conn.commit()
@@ -234,15 +243,18 @@ class EmailState:
         """
         skip, include = set(), set()
         with self._lock:
-            rows = self.conn.execute("SELECT message_id, status, attempts FROM emails").fetchall()
+            rows = self.conn.execute("SELECT message_id, status, attempts, reason FROM emails").fetchall()
         for r in rows:
             mid, status, attempts = r["message_id"], r["status"], r["attempts"]
+            limit = self.max_attempts
+            if (r["reason"] or "").startswith(READ_ERROR_PREFIX):
+                limit = max(limit, READ_ERROR_MAX_ATTEMPTS)
             if status == DONE:
                 skip.add(mid)
             elif status == SKIPPED:
                 (include if reprocess_skipped else skip).add(mid)
             elif status == FAILED:
-                if attempts < self.max_attempts or retry_failed:
+                if attempts < limit or retry_failed:
                     include.add(mid)
                 else:
                     skip.add(mid)
@@ -335,31 +347,35 @@ class EmailState:
             return self.conn.execute("SELECT COUNT(*) FROM petro_invoices").fetchone()[0]
 
     def petro_pending_downloads(self, limit=None):
-        """Hóa đơn Petro có mã tra cứu nhưng chưa tải PDF (gồm cả lần trước tải lỗi)."""
+        """Hóa đơn Petro có mã tra cứu nhưng chưa tải PDF (gồm cả lần trước tải lỗi).
+        Bỏ các mã đã bị trang tra cứu báo "không tồn tại hóa đơn" đủ PETRO_NOT_FOUND_MAX lần."""
         sql = (
             "SELECT * FROM petro_invoices WHERE ma_tra_cuu <> '' "
             "AND COALESCE(pdf_status,'PENDING') NOT IN ('DONE','DUPLICATE') "
+            "AND COALESCE(pdf_not_found,0) < ? "
             "ORDER BY COALESCE(mail_date,'') DESC, message_id"
         )
-        params = []
+        params = [PETRO_NOT_FOUND_MAX]
         if limit:
             sql += " LIMIT ?"
             params.append(int(limit))
         with self._lock:
             return [dict(r) for r in self.conn.execute(sql, params).fetchall()]
 
-    def set_petro_pdf(self, message_id, status, pdf_file=None, error=None):
-        """Ghi kết quả tải PDF Petro. Khi DONE, ghi luôn tên file vào sổ email (cột files trong CSV)."""
+    def set_petro_pdf(self, message_id, status, pdf_file=None, error=None, not_found=False):
+        """Ghi kết quả tải PDF Petro. Khi DONE, ghi luôn tên file vào sổ email (cột files trong CSV).
+        not_found=True: trang tra cứu báo không tồn tại hóa đơn -> đếm thêm 1 lần (xem PETRO_NOT_FOUND_MAX)."""
         with self._lock:
             self.conn.execute(
                 """
                 UPDATE petro_invoices
                 SET pdf_status=?, pdf_file=?, pdf_error=?,
                     pdf_attempts=COALESCE(pdf_attempts,0)+1, pdf_updated_at=?,
-                    force_pdf=CASE WHEN ?='DONE' THEN 0 ELSE force_pdf END
+                    force_pdf=CASE WHEN ?='DONE' THEN 0 ELSE force_pdf END,
+                    pdf_not_found=CASE WHEN ? THEN COALESCE(pdf_not_found,0)+1 ELSE COALESCE(pdf_not_found,0) END
                 WHERE message_id=?
                 """,
-                (status, pdf_file, error, _now(), status, message_id),
+                (status, pdf_file, error, _now(), status, 1 if not_found else 0, message_id),
             )
             if status == DONE and pdf_file:
                 self.conn.execute(
@@ -431,6 +447,19 @@ class EmailState:
                         "UPDATE emails SET reason='PETRO_EXTRACTED' WHERE message_id=?", (mid,))
             self.conn.commit()
         return {"total": self.petro_duplicate_count(), "new": new}
+
+    def petro_not_found_count(self, message_id):
+        with self._lock:
+            r = self.conn.execute(
+                "SELECT COALESCE(pdf_not_found,0) FROM petro_invoices WHERE message_id=?", (message_id,)).fetchone()
+        return r[0] if r else 0
+
+    def petro_reset_not_found(self, message_ids):
+        """Cho các hóa đơn này được tra cứu lại (bạn chủ động bấm tải lại)."""
+        with self._lock:
+            self.conn.executemany(
+                "UPDATE petro_invoices SET pdf_not_found=0 WHERE message_id=?", [(m,) for m in message_ids])
+            self.conn.commit()
 
     def petro_unsynced_master_rows(self):
         """Hóa đơn đã tải xong nhưng chưa được ghi vào file tổng (cũ nhất trước)."""

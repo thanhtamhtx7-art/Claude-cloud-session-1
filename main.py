@@ -23,10 +23,10 @@ from google.auth.transport.requests import Request
 from email.header import decode_header
 from datetime import datetime, timedelta
 
-from quet_email import run_scan, list_all_messages, get_local_service
+from quet_email import run_scan, list_all_messages, get_local_service, GMAIL_RETRIES, SCAN_WORKERS
 from email_state import (
     EmailState, DONE, FAILED, SKIPPED, PENDING, ALL_STATUSES, gmail_link,
-    norm_code, norm_so, in_master,
+    norm_code, norm_so, in_master, PETRO_NOT_FOUND_MAX,
 )
 
 try:
@@ -473,7 +473,7 @@ def _attachment_bytes(service, msg_id, part):
     body = part.get("body") or {}
     if body.get("attachmentId"):
         att = service.users().messages().attachments().get(
-            userId="me", messageId=msg_id, id=body["attachmentId"]).execute()
+            userId="me", messageId=msg_id, id=body["attachmentId"]).execute(num_retries=GMAIL_RETRIES)
         return base64.urlsafe_b64decode(att["data"])
     if body.get("data"):
         return base64.urlsafe_b64decode(body["data"])
@@ -523,7 +523,7 @@ def _email_payload(service, msg_id, parts=None):
     parts = None (không có sẵn) -> đọc email như cũ bằng messages.get(format="full")."""
     if parts is not None:
         return {"parts": parts}
-    return service.users().messages().get(userId="me", id=msg_id, format="full").execute()["payload"]
+    return service.users().messages().get(userId="me", id=msg_id, format="full").execute(num_retries=GMAIL_RETRIES)["payload"]
 
 def _check_xml_one(msg_id, creds, kind, parts=None):
     try:
@@ -702,7 +702,7 @@ def get_email_subject(service, msg_id):
             userId="me",
             id=msg_id,
             format="metadata"
-        ).execute()
+        ).execute(num_retries=GMAIL_RETRIES)
         headers = msg.get("payload", {}).get("headers", [])
         subject = ""
         for h in headers:
@@ -734,7 +734,7 @@ def extract_email_text(html):
         return "CANNOT_PARSE_EMAIL_CONTENT"
 
 def get_label_id(service, label_name):
-    labels = service.users().labels().list(userId="me").execute().get("labels", [])
+    labels = service.users().labels().list(userId="me").execute(num_retries=GMAIL_RETRIES).get("labels", [])
     for l in labels:
         if l["name"].lower() == label_name.lower():
             return l["id"]
@@ -768,7 +768,7 @@ def download_single_pdf(msg_id, creds, parts=None):
                 continue
 
             attachment = local_service.users().messages().attachments().get(
-                userId="me", messageId=msg_id, id=attachment_id).execute()
+                userId="me", messageId=msg_id, id=attachment_id).execute(num_retries=GMAIL_RETRIES)
             data = base64.urlsafe_b64decode(attachment["data"])
 
             filename = part.get("filename") or f"{msg_id}_{i}.pdf"
@@ -796,7 +796,7 @@ def download_pdfs_parallel(pdf_email_ids, creds, parts_by_id=None):
     total_downloaded = 0
     successful_ids = set()
     parts_by_id = parts_by_id or {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=SCAN_WORKERS) as executor:
         future_to_msg_id = {executor.submit(download_single_pdf, msg_id, creds, parts_by_id.get(msg_id)): msg_id
                             for msg_id in pdf_email_ids}
         for future in concurrent.futures.as_completed(future_to_msg_id):
@@ -1695,7 +1695,7 @@ def petro_header(msg, name):
 
 def petro_fetch_record(service, msg_id):
     """Đọc một email Petro và trích xuất dữ liệu (cùng cách làm với petro.py)."""
-    msg = service.users().messages().get(userId="me", id=msg_id, format="full").execute()
+    msg = service.users().messages().get(userId="me", id=msg_id, format="full").execute(num_retries=GMAIL_RETRIES)
     body_text, mime = petro_get_body_text(msg["payload"])
     so_hoa_don, ma_tra_cuu = (None, None)
     if body_text:
@@ -2519,7 +2519,10 @@ async def run_petro_downloads(state, prompt=True):
                         manual_timeouts_in_row = auto_fail_in_row = 0
                         reason = f"Không tồn tại hóa đơn với mã này (trang báo: {detail})"[:300]
                         print(f"   -> {reason}")
-                        state.set_petro_pdf(mid, FAILED, error=reason)
+                        state.set_petro_pdf(mid, FAILED, error=reason, not_found=True)
+                        if state.petro_not_found_count(mid) >= PETRO_NOT_FOUND_MAX:
+                            print(f"   -> Đã {PETRO_NOT_FOUND_MAX} lần báo không tồn tại -> KHÔNG tự thử lại nữa. "
+                                  "Kiểm tra lại mã trong email; muốn thử lại thì 'Đánh dấu xử lý lại' email này.")
 
                     elif kind == "message":
                         stats["failed"] += 1
@@ -2645,7 +2648,9 @@ def _export_issues(state, issues, url_by_id=None, xml_rows=None):
             "subject": r.get("subject") or "",
             "so_hoa_don": r.get("so_hoa_don") or "",
             "ma_tra_cuu": r.get("ma_tra_cuu") or "",
-            "reason": "Đã có mã tra cứu nhưng chưa tải PDF" if pending else "Tải PDF lỗi ở lần trước",
+            "reason": ("Đã có mã tra cứu nhưng chưa tải PDF" if pending else
+                       f"Trang tra cứu báo không tồn tại hóa đơn {PETRO_NOT_FOUND_MAX} lần -> đã thôi tự thử lại, kiểm tra mã"
+                       if (r.get("pdf_not_found") or 0) >= PETRO_NOT_FOUND_MAX else "Tải PDF lỗi ở lần trước"),
             "hint": f"Tra cứu bằng mã tra cứu tại {PETRO_LOOKUP_URL} rồi tải PDF (hoặc chạy: python main.py --download-petro)",
             "url": PETRO_LOOKUP_URL,
             "email_id": mid,
@@ -2988,8 +2993,9 @@ async def _pipeline(args, creds, gmail_service, state):
             extra_query=build_date_query() or None,
         )
     except Exception as e:
-        print("Lỗi run_scan:", e)
-        result = {"data": []}
+        # Không quét được Gmail (mất mạng, token hết hạn, vượt giới hạn...) -> DỪNG và báo lỗi.
+        # Trước đây chạy tiếp với danh sách rỗng nên giao diện vẫn báo "Đã chạy xong".
+        raise ScanError(f"Không quét được Gmail: {e!r}") from e
 
     all_data = result.get("data", [])
     read_errors = result.get("read_errors", [])
@@ -3140,7 +3146,16 @@ async def _pipeline(args, creds, gmail_service, state):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
 
+        # Mỗi link cần 1 phiên trình duyệt riêng. Chỉ mở phiên khi tới lượt (tối đa MAX_CONCURRENT phiên
+        # cùng lúc) - trước đây mở phiên cho TẤT CẢ link ngay từ đầu, hàng trăm link sẽ ngốn rất nhiều RAM.
+        # Dùng semaphore riêng: `sem` được các hàm process_* tự giữ bên trong, giữ lồng 2 lần sẽ bị kẹt.
+        ctx_sem = asyncio.Semaphore(MAX_CONCURRENT)
+
         async def wrapper(item):
+            async with ctx_sem:
+                await _process_link(item)
+
+        async def _process_link(item):
             nonlocal success
             context = await browser.new_context(accept_downloads=True)
             eid = item.get("email_id", "UNKNOWN")
@@ -3297,10 +3312,18 @@ async def main_download_petro(args):
     finally:
         state.close()
 
+class ScanError(Exception):
+    """Lỗi khiến lần chạy không quét được Gmail (chương trình kết thúc với mã lỗi 1)."""
+
+
 def cli():
     """Điểm vào của chương trình. Luôn in đường dẫn file log ở cuối, kể cả khi chạy lỗi."""
     try:
         _cli()
+    except ScanError as e:
+        print(f"[ERROR] {e}")
+        print("[ERROR] Lần chạy này DỪNG, chưa tải được gì. Kiểm tra kết nối mạng / đăng nhập Gmail rồi chạy lại.")
+        sys.exit(1)
     finally:
         if LOG_PATH:
             print(f"[LOG] Log lần chạy này: {LOG_PATH}")

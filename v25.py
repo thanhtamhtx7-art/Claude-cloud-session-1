@@ -516,6 +516,32 @@ def _item_from_text(text: str) -> str:
 
 _NO_TABLE_HIT = object()
 
+
+class _PageScope:
+    """Một nhóm trang của PDF (1 hóa đơn). Kết quả tìm tên hàng trong bảng được lưu theo nhóm trang,
+    không theo cả file - trước đây mọi hóa đơn trong 1 PDF đều lấy chung tên hàng của bảng đầu tiên."""
+
+    def __init__(self, pages):
+        self.pages = pages
+
+
+def _group_invoice_pages(valid_pages):
+    """[(số trang, text)] -> các nhóm trang, mỗi nhóm là 1 hóa đơn.
+    Trang được gộp vào hóa đơn đứng trước khi: cùng Ký hiệu + Số hóa đơn (trang sau lặp lại phần đầu hóa đơn),
+    hoặc trang không có Ký hiệu, Số hóa đơn lẫn tiêu đề "Hóa đơn" (trang tiếp theo của bảng hàng hóa)."""
+    groups, cur_id = [], None
+    for i, txt in valid_pages:
+        ky = extract_ky_hieu(txt)
+        so = _invoice_no_from_text(txt)
+        ident = (ky.upper(), so) if so else None
+        heading = bool(_INVOICE_RE.search(txt[:_HEADER_CHARS]))
+        if groups and ((ident and ident == cur_id) or (not ident and not ky and not heading)):
+            groups[-1].append((i, txt))
+            continue
+        groups.append([(i, txt)])
+        cur_id = ident
+    return groups
+
 def _extract_item_from_tables(pdf, text: str) -> str:
     # [v26-A5] Kết quả quét bảng chỉ phụ thuộc vào pdf, không phụ thuộc `text` của trang,
     # nên chỉ quét 1 lần/pdf (trước đây PDF N trang quét bảng N x N lần).
@@ -736,16 +762,24 @@ def extract_data(pdf_path: str) -> list[dict]:
                 valid_pages = [(i, txt) for i, txt in pages if not is_non_invoice_attachment_page(txt)] or pages
 
                 if len(valid_pages) > 1:
+                    # Gộp các trang của CÙNG 1 hóa đơn (hóa đơn dài 2-3 trang) thành 1 dòng;
+                    # PDF chứa nhiều hóa đơn thì mỗi hóa đơn 1 dòng như trước.
+                    groups = _group_invoice_pages(valid_pages)
+                    ext = os.path.splitext(file_name)[1]
                     rows = []
-                    for i, txt in valid_pages:
-                        fn = f"{base_name}_p{i+1}{os.path.splitext(file_name)[1]}"
-                        row = _extract_from_text(txt, issuer, "text", pdf=pdf, file_name=fn)
-                        row["Ten file"] = f"{base_name}_p{i+1}"
-                        row["_extra"]   = True
+                    for group in groups:
+                        first = group[0][0] + 1
+                        txt = "\n".join(t for _, t in group)
+                        scope = _PageScope([pdf.pages[i] for i, _ in group])   # bảng hàng hóa của đúng hóa đơn này
+                        if len(groups) == 1:
+                            row = _extract_from_text(txt, issuer, "text", pdf=scope, file_name=file_name)
+                            row["Ten file"] = base_name
+                        else:
+                            row = _extract_from_text(txt, issuer, "text", pdf=scope,
+                                                     file_name=f"{base_name}_p{first}{ext}")
+                            row["Ten file"] = f"{base_name}_p{first}"
                         rows.append(row)
-                    if rows:
-                        for r in rows: r.pop("_extra", None)
-                        return rows
+                    return rows
 
                 row = _extract_from_text(all_text, issuer, "text", pdf=pdf, file_name=file_name)
                 row["Ten file"] = base_name
