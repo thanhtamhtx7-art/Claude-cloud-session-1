@@ -1,0 +1,14 @@
+# Bí mật / dữ liệu riêng của từng máy - KHÔNG đưa lên GitHub
+credentials.json
+tokens/
+token*.json
+app_ui.json
+state/
+downloads/
+outputs/
+logs/
+*.xlsx
+*.db
+*.db-wal
+*.db-shm
+__pycache__/

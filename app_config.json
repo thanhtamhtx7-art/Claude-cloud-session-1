@@ -1,0 +1,50 @@
+{
+  "profiles": [
+    {
+      "id": "s7",
+      "display": "S7",
+      "label": "xd",
+      "token": "tokens/token_s7.json",
+      "download_dir": "downloads/s7",
+      "credentials": "credentials.json"
+    },
+    {
+      "id": "lh",
+      "display": "LH",
+      "label": "xd",
+      "token": "tokens/token_lh.json",
+      "download_dir": "downloads/lh",
+      "credentials": "credentials.json"
+    },
+    {
+      "id": "thp",
+      "display": "THP",
+      "label": "xd",
+      "token": "tokens/token_thp.json",
+      "download_dir": "downloads/thp",
+      "credentials": "credentials.json"
+    },
+    {
+      "id": "Tam_LH",
+      "display": "Tam_LH",
+      "label": "xd",
+      "token": "tokens/token_Tam_LH.json",
+      "download_dir": "downloads/Tam_LH",
+      "credentials": "credentials.json"
+    },
+    {
+      "id": "email5",
+      "display": "EMAIL5",
+      "label": "xd",
+      "token": "tokens/token_email5.json",
+      "download_dir": "downloads/email5",
+      "credentials": "credentials.json"
+    }
+  ],
+  "tools": {
+    "root": "C:/Users/MSI/OneDrive/Desktop/project",
+    "sort_tool": "Tool sap xep file/main.py",
+    "convert_all": "Tool_Convert/main.py",
+    "zalo_tool": "Tool_Copy_Zalo/zalo.py"
+  }
+}

@@ -1,0 +1,137 @@
+﻿BỘ CÔNG CỤ HÓA ĐƠN - HƯỚNG DẪN CHUYỂN SANG PC MỚI
+(đổi thư mục chứa code + tạo credentials/token Gmail mới hoàn toàn)
+======================================================================
+
+TÓM TẮT 6 BƯỚC
+   A. PC cũ   : bấm đúp Gom_file_chuyen_may.bat -> được 1 thư mục đủ file
+   B. Web     : tạo credentials.json mới trên Google Cloud
+   C. PC mới  : cài Python, chép thư mục sang, đặt credentials.json, bấm đúp Cai_dat.bat
+   D. PC mới  : đặt file tổng Petro (nếu dùng)
+   E. PC mới  : Chay_giao_dien.bat -> đăng nhập lại từng Gmail
+   F. Kiểm tra + dọn PC cũ
+
+
+----------------------------------------------------------------------
+A. TRÊN PC CŨ: GOM FILE
+----------------------------------------------------------------------
+1. Mở thư mục bo_chuyen_may (nằm trong thư mục dự án), bấm đúp Gom_file_chuyen_may.bat.
+2. Trả lời các câu hỏi:
+   - Dùng bản code nào: Enter = bản mới nhất (bản đang chạy, vd 2.0.1).
+   - Thư mục đích: Enter = Desktop\Bo_cong_cu_hoa_don_chuyen_may.
+   - PC mới vẫn đọc CÁC GMAIL CŨ?
+       C (có)   : chép kèm state\ (sổ theo dõi), downloads\, outputs\
+                  -> không tải lại email/hóa đơn đã có.
+       K (không): PC mới dùng Gmail khác hoàn toàn -> bắt đầu sổ mới.
+   - Chép kèm file tổng Petro ở ổ D: (nếu vẫn dùng Gmail cũ nên chọn C).
+3. Script chỉ ĐỌC và CHÉP, không sửa/xóa gì ở thư mục gốc. Kết quả có file
+   DANH_SACH_FILE_DA_GOM.txt ghi rõ file nào lấy từ đâu.
+
+Thư mục sau khi gom gồm:
+   main.py, quet_email.py, email_state.py, app.py, v25.py
+   Bo_cong_cu_hoa_don.html, Chay_giao_dien.bat, Cai_dat.bat
+   app_config.json          (danh sách profile, đường dẫn tương đối nên đổi thư mục vẫn chạy)
+   tokens\                  (TRỐNG - token mới tạo ở bước E)
+   state\, downloads\, outputs\   (chỉ khi chọn kèm dữ liệu)
+
+CỐ Ý KHÔNG CHÉP:
+   credentials.json, tokens\*.json -> tạo mới (bước B, E)
+   app_ui.json                     -> chứa đường dẫn của PC cũ, chương trình tự tạo lại
+   logs\, code gốc\, ban_sua_*, __pycache__
+
+
+----------------------------------------------------------------------
+B. TẠO API MỚI TRÊN GOOGLE CLOUD (làm 1 lần, máy nào cũng được)
+----------------------------------------------------------------------
+1. Vào https://console.cloud.google.com bằng Gmail sẽ QUẢN LÝ ứng dụng.
+   Góc trên -> chọn dự án -> New Project -> đặt tên (vd: Bo-cong-cu-hoa-don) -> Create.
+2. APIs & Services -> Library -> tìm "Gmail API" -> Enable.
+3. OAuth consent screen (giao diện mới: "Google Auth Platform"):
+   - User type: External.
+   - Điền App name, User support email, Developer contact -> lưu.
+   - Mục "Test users" (giao diện mới: "Audience" -> Test users) -> Add users:
+     THÊM TẤT CẢ GMAIL CẦN QUÉT (THP, LH, S7, Tam_LH...).
+     Gmail không có trong danh sách sẽ bị báo "Access blocked" khi đăng nhập.
+4. Credentials -> Create credentials -> OAuth client ID
+   -> Application type: Desktop app -> Create -> DOWNLOAD JSON.
+5. Đổi tên file vừa tải thành đúng: credentials.json
+
+Lưu ý: ứng dụng ở chế độ Testing -> Google có thể cho token hết hạn sau khoảng 7 ngày.
+Khi giao diện báo "Chưa đăng nhập Gmail" thì chỉ cần Quét & tải lại và đăng nhập lại.
+Không chia sẻ credentials.json và thư mục tokens\ cho người khác.
+
+
+----------------------------------------------------------------------
+C. CÀI ĐẶT TRÊN PC MỚI
+----------------------------------------------------------------------
+1. Cài Python 3.14 từ https://www.python.org/downloads/
+   BẮT BUỘC tick "Add Python to PATH" ở màn hình cài đầu tiên.
+2. Chép thư mục đã gom ở bước A sang PC mới, đặt ở đâu cũng được
+   (vd D:\Bo_cong_cu_hoa_don). Tránh để chung trong OneDrive với PC cũ nếu 2 máy
+   cùng chạy: sổ theo dõi (state\*.db) dễ bị xung đột khi 2 máy cùng ghi.
+3. Đặt credentials.json (bước B) vào thư mục đó, CẠNH main.py.
+4. Bấm đúp Cai_dat.bat -> cài thư viện Python + trình duyệt Chromium (cần Internet,
+   mất vài phút). Cuối cùng cửa sổ hiện bảng kiểm tra, phải thấy "Thư viện chính: OK".
+5. (Chỉ khi dùng v25 quét PDF DẠNG ẢNH) cài thêm:
+   - Tesseract OCR: https://github.com/UB-Mannheim/tesseract/wiki
+     (khi cài chọn thêm ngôn ngữ Vietnamese), thêm thư mục cài vào PATH.
+   - Poppler: https://github.com/oschwartz10612/poppler-windows/releases
+     giải nén, thêm thư mục ...\Library\bin vào PATH.
+   Chạy lại Cai_dat.bat để kiểm tra: "Tesseract OCR: OK", "Poppler: OK".
+
+
+----------------------------------------------------------------------
+D. FILE TỔNG PETRO (chỉ khi dùng Petrolimex)
+----------------------------------------------------------------------
+Mặc định chương trình dùng:
+   D:\Làm việc\hđ đang xử lý\hoa_don_petrolimex_tong_hop_down.xlsx
+- PC mới có ổ D: -> chép file (thư mục _file_tong_Petro_chep_vao_o_D) vào đúng chỗ trên.
+- PC mới KHÔNG có ổ D: hoặc muốn để chỗ khác -> mở app_config.json, thêm vào TỪNG profile:
+     "petro_master": "E:\\ThuMucMoi\\hoa_don_petrolimex_tong_hop_down.xlsx",
+  (dùng 2 dấu \\ trong đường dẫn). Muốn tắt lọc trùng theo file tổng: "petro_master": ""
+- Gmail của CÔNG TY KHÁC: nên cho profile đó 1 file tổng Petro RIÊNG (như trên)
+  để hóa đơn không bị gộp chung.
+
+
+----------------------------------------------------------------------
+E. ĐĂNG NHẬP LẠI TỪNG GMAIL (tạo token mới)
+----------------------------------------------------------------------
+1. Bấm đúp Chay_giao_dien.bat -> trình duyệt mở http://127.0.0.1:8765
+   (giữ cửa sổ đen mở trong lúc dùng).
+2. Với TỪNG profile:
+   - Chọn profile ở ô "Đang làm việc với" (thanh bên trái).
+   - Trang Tải hóa đơn Gmail: chọn khoảng ngày ngắn (1-2 ngày) -> bấm Quét & tải.
+   - Trình duyệt mở trang Google -> CHỌN ĐÚNG GMAIL CỦA PROFILE ĐÓ -> Cho phép.
+     Nếu Google báo "Ứng dụng chưa được xác minh": bấm Nâng cao -> Tiếp tục.
+   - Chương trình tự lưu tokens\token_<profile>.json.
+3. Thêm Gmail mới: trang Công cụ & profile -> Thêm email -> đặt tên profile
+   -> Lưu, rồi làm như bước 2. Nhớ thêm Gmail đó vào Test users (bước B.3).
+
+
+----------------------------------------------------------------------
+F. KIỂM TRA + DỌN PC CŨ
+----------------------------------------------------------------------
+Kiểm tra trên PC mới (trang Công cụ & profile):
+   [ ] Thông tin chương trình: main.py "Đã thấy", credentials.json "Đã có",
+       Tự giải CAPTCHA "Đã cài ddddocr", có đường dẫn File v25.
+   [ ] Bảng profile: tất cả "Đã đăng nhập".
+   [ ] Nếu có chép state\: "Email trong sổ" KHỚP với PC cũ.
+   [ ] Trang Kết quả báo "chưa bật bố cục thư mục mới"? Bình thường -> tự hết sau
+       lần Quét & tải đầu tiên trên PC mới.
+
+Dọn PC cũ (khi không dùng nữa):
+   [ ] Xóa credentials.json và thư mục tokens\ trên PC cũ.
+   [ ] Với TỪNG Gmail: vào https://myaccount.google.com/permissions -> chọn ứng dụng CŨ
+       -> Xóa quyền truy cập.
+   [ ] (Không dùng dự án Google Cloud cũ nữa) vào dự án cũ -> Credentials -> xóa OAuth client cũ.
+
+
+----------------------------------------------------------------------
+LỖI HAY GẶP
+----------------------------------------------------------------------
+- "Access blocked" / "access_denied" khi đăng nhập Gmail
+    -> Gmail đó chưa có trong Test users (bước B.3).
+- "Không thấy credentials.json" -> đặt credentials.json cạnh main.py, đúng tên.
+- Cai_dat.bat báo chưa có Python -> cài lại Python, nhớ tick "Add Python to PATH".
+- Petrolimex không tự giải CAPTCHA -> ddddocr chưa cài được; chạy lại Cai_dat.bat,
+  hoặc chọn "Chỉ nhập tay" ở trang Hóa đơn Petrolimex.
+- v25 quét PDF dạng ảnh ra ô trống -> thiếu Tesseract/Poppler (bước C.5).
