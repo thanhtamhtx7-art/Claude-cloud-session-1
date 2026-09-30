@@ -14,6 +14,8 @@ TÓM TẮT 6 BƯỚC
 ----------------------------------------------------------------------
 A. TRÊN PC CŨ: GOM FILE
 ----------------------------------------------------------------------
+0. TẮT cửa sổ Chay_giao_dien.bat (và main.py nếu đang chạy) để sổ theo dõi ghi xong hết.
+   Script tự kiểm tra: còn đang chạy thì sẽ hỏi lại trước khi gom.
 1. Mở thư mục bo_chuyen_may (nằm trong thư mục dự án), bấm đúp Gom_file_chuyen_may.bat.
 2. Trả lời các câu hỏi:
    - Dùng bản code nào: Enter = bản mới nhất (bản đang chạy, vd 2.0.1).

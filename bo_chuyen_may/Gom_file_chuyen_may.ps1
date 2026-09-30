@@ -58,6 +58,32 @@ if (-not $KhongHoi) {
 }
 Write-Host "=> Dùng bản $($chon.Ver): $($chon.Dir)" -ForegroundColor Green
 
+# ---------- 2b. Chương trình còn đang chạy? ----------
+# Sổ theo dõi (state\*.db) ghi theo kiểu WAL: dữ liệu mới có thể còn nằm trong file *.db-wal cho tới khi
+# chương trình tắt. Chép lúc đang chạy dễ được bản sổ thiếu / lệch -> nên tắt giao diện trước khi gom.
+$dangChay = @()
+$congMo = @()                                     # app.py dùng cổng 8765, bận thì lấy cổng kế tiếp (tới 8784)
+try {                                             # chỉ hỏi cổng đang mở (hỏi cổng đóng trên Windows mất ~1-2 giây/cổng)
+    $congMo = @(Get-NetTCPConnection -State Listen -LocalPort (8765..8784) -ErrorAction Stop |
+                Select-Object -ExpandProperty LocalPort -Unique)
+} catch { }
+foreach ($port in $congMo) {
+    try {
+        $r = Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/ping" -TimeoutSec 1
+        if ($r.app -eq "hoadon") { $dangChay += "giao diện (http://127.0.0.1:$port)" }
+    } catch { }
+}
+foreach ($d in @($chon.Dir, $Goc) | Select-Object -Unique) {
+    $wal = @(Get-ChildItem (Join-Path $d "state") -Filter "*.db-wal" -ErrorAction SilentlyContinue | Where-Object { $_.Length -gt 0 })
+    if ($wal.Count) { $dangChay += "sổ đang ghi dở: " + (($wal | ForEach-Object { $_.Name }) -join ", ") }
+}
+if ($dangChay.Count) {
+    Write-Host ""
+    Write-Host "[CẢNH BÁO] Bộ công cụ có vẻ đang chạy: $($dangChay -join '; ')" -ForegroundColor Yellow
+    Write-Host "           Hãy tắt cửa sổ Chay_giao_dien.bat (và cửa sổ main.py nếu có) rồi gom lại, để sổ theo dõi chép đủ."
+    if (-not (Hoi-CoKhong "Vẫn tiếp tục gom?" $false)) { exit 1 }
+}
+
 # ---------- 3. Thư mục đích ----------
 if (-not $Dich) {
     $macDinhDich = Join-Path ([Environment]::GetFolderPath("Desktop")) "Bo_cong_cu_hoa_don_chuyen_may"
@@ -80,6 +106,13 @@ if (-not $PSBoundParameters.ContainsKey("KemFileTongPetro")) {
 
 New-Item -ItemType Directory -Force $Dich | Out-Null
 $ghiChu = New-Object System.Collections.Generic.List[string]
+$canhBao = New-Object System.Collections.Generic.List[string]
+function Moi-Nhat([string[]]$duongDan) {
+    # File sửa gần nhất trong các đường dẫn (bỏ đường dẫn không tồn tại). Không có -> $null
+    $co = @($duongDan | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } |
+            ForEach-Object { Get-Item -LiteralPath $_ } | Sort-Object FullName -Unique | Sort-Object LastWriteTime -Descending)
+    if ($co.Count) { return $co[0].FullName } else { return $null }
+}
 function Chep([string]$nguon, [string]$ten, [string]$vao = "") {
     $dichDen = if ($vao) { Join-Path $Dich $vao } else { $Dich }
     New-Item -ItemType Directory -Force $dichDen | Out-Null
@@ -92,13 +125,36 @@ function Chep([string]$nguon, [string]$ten, [string]$vao = "") {
 Write-Host ""
 Write-Host "Đang chép..."
 foreach ($f in $can) { Chep (Join-Path $chon.Dir $f) $f }
-foreach ($f in @("email_state.py", "v25.py", "Chay_giao_dien.bat", "app_config.json")) {
+foreach ($f in @("email_state.py", "Chay_giao_dien.bat", "app_config.json")) {
     $p = if (Test-Path (Join-Path $chon.Dir $f)) { Join-Path $chon.Dir $f } else { Join-Path $Goc $f }
     if (Test-Path $p) { Chep $p $f } else { Write-Host "  [CẢNH BÁO] Không thấy $f" -ForegroundColor Yellow }
 }
-foreach ($f in @("Cai_dat.bat", "HUONG_DAN_CHUYEN_MAY.txt")) {
-    $p = Join-Path $PSScriptRoot $f
-    if (Test-Path $p) { Chep $p $f }
+
+# v25: giao diện chạy file v25 đã lưu trong app_ui.json (v25_path) - có thể nằm NGOÀI thư mục code.
+# Lấy bản sửa gần nhất trong: đường dẫn đã lưu / cạnh main.py / thư mục dự án.
+$v25DaLuu = ""
+foreach ($ui in @((Join-Path $chon.Dir "app_ui.json"), (Join-Path $Goc "app_ui.json"))) {
+    if (-not $v25DaLuu -and (Test-Path $ui)) {
+        try { $v25DaLuu = [string]((Get-Content $ui -Raw -Encoding UTF8 | ConvertFrom-Json).v25_path) } catch { }
+    }
+}
+$v25 = Moi-Nhat @($v25DaLuu, (Join-Path $chon.Dir "v25.py"), (Join-Path $Goc "v25.py"))
+if ($v25) {
+    Chep $v25 "v25.py"                            # luôn đặt tên v25.py cạnh main.py để PC mới tự tìm thấy
+    if ($v25DaLuu -and (Test-Path -LiteralPath $v25DaLuu) -and ((Get-Item -LiteralPath $v25DaLuu).FullName -ne $v25)) {
+        $canhBao.Add("Giao diện PC cũ đang chạy v25 ở $v25DaLuu, nhưng bản MỚI HƠN là $v25 -> đã chép bản mới hơn. " +
+                     "Nếu còn dùng PC cũ: sửa đường dẫn File v25 ở trang Quét hóa đơn cho khớp.")
+    }
+} else { Write-Host "  [CẢNH BÁO] Không thấy v25.py" -ForegroundColor Yellow }
+
+# Cai_dat.bat, requirements.txt, hướng dẫn: lấy bản MỚI NHẤT - khi cập nhật code, các file này thường được
+# chép vào cạnh main.py, còn bản cũ vẫn nằm trong thư mục bo_chuyen_may.
+foreach ($f in @("Cai_dat.bat", "requirements.txt", "HUONG_DAN_CHUYEN_MAY.txt")) {
+    $p = Moi-Nhat @((Join-Path $chon.Dir $f), (Join-Path $Goc $f), (Join-Path $PSScriptRoot $f))
+    if ($p) { Chep $p $f }
+    elseif ($f -eq "requirements.txt") {
+        $canhBao.Add("Không thấy requirements.txt -> Cai_dat.bat trên PC mới sẽ cài bản MỚI NHẤT của thư viện, có thể khác PC cũ.")
+    } else { Write-Host "  [CẢNH BÁO] Không thấy $f" -ForegroundColor Yellow }
 }
 New-Item -ItemType Directory -Force (Join-Path $Dich "tokens") | Out-Null     # token mới tạo khi đăng nhập trên PC mới
 
@@ -108,7 +164,8 @@ if ($KemDuLieu) {
         $p = Join-Path $Goc $d
         if (Test-Path $p) {
             Chep $p $d
-            # state\*.csv và file tạm SQLite (-wal/-shm) không cần: chương trình tự tạo lại
+            # Chép nguyên thư mục, kể cả *.db-wal nếu có: file này có thể còn dữ liệu CHƯA ghi vào *.db
+            # (vì vậy nên tắt chương trình trước khi gom, xem bước 2b).
         }
     }
 }
@@ -132,11 +189,19 @@ if ($KemFileTongPetro) {
     $ds += "File tổng Petro: chép file trong thư mục _file_tong_Petro_chep_vao_o_D vào đúng"
     $ds += "  $(Split-Path $fileTong -Parent)  trên PC mới (hoặc khai báo 'petro_master' trong app_config.json)."
 }
+try {
+    $root = [string]((Get-Content (Join-Path $Dich "app_config.json") -Raw -Encoding UTF8 | ConvertFrom-Json).tools.root)
+    if ($root) {
+        $canhBao.Add("app_config.json -> tools.root = $root  (chỉ cần khi dùng Tool_Convert: sửa thành thư mục project trên PC mới).")
+    }
+} catch { }
+if ($canhBao.Count) { $ds += ""; $ds += "LƯU Ý:"; $ds += @($canhBao | ForEach-Object { "  - $_" }) }
 $ds | Set-Content -Encoding UTF8 (Join-Path $Dich "DANH_SACH_FILE_DA_GOM.txt")
 
 $tong = (Get-ChildItem $Dich -Recurse -File | Measure-Object Length -Sum)
 Write-Host ""
 Write-Host ("XONG: {0} file, {1:N1} MB -> {2}" -f $tong.Count, ($tong.Sum / 1MB), $Dich) -ForegroundColor Green
+foreach ($c in $canhBao) { Write-Host "[LƯU Ý] $c" -ForegroundColor Yellow }
 Write-Host ""
 Write-Host "Việc tiếp theo:"
 Write-Host "  1. Chép thư mục trên sang PC mới (USB / Google Drive / mạng nội bộ)."
